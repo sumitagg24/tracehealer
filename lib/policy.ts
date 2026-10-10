@@ -13,6 +13,10 @@ export interface TraceHealerPolicy {
   maxDiffBytes: number;
   allowTestEdits: boolean;
   allowModelPatches: boolean;
+  /** Sandbox provider that actually executes target code. */
+  sandboxProvider: "local-process" | "docker";
+  /** Container hardening limits (only used by the docker provider). */
+  container: { image: string; memoryMb: number; cpus: number; pidsLimit: number; uid: number; gid: number };
 }
 
 const DEFAULT_PROTECTED = [
@@ -63,6 +67,15 @@ export function loadPolicy(env: NodeJS.ProcessEnv = process.env): TraceHealerPol
     maxDiffBytes: positiveInt(env.TRACEHEALER_MAX_DIFF_BYTES, 200_000, "TRACEHEALER_MAX_DIFF_BYTES"),
     allowTestEdits: boolValue(env.TRACEHEALER_ALLOW_TEST_EDITS, false),
     allowModelPatches: boolValue(env.TRACEHEALER_ALLOW_MODEL_PATCHES, false),
+    sandboxProvider: env.TRACEHEALER_SANDBOX_PROVIDER === "docker" ? "docker" : "local-process",
+    container: {
+      image: env.TRACEHEALER_CONTAINER_IMAGE ?? "tracehealer-sandbox:latest",
+      memoryMb: positiveInt(env.TRACEHEALER_CONTAINER_MEMORY_MB, 512, "TRACEHEALER_CONTAINER_MEMORY_MB"),
+      cpus: positiveInt(env.TRACEHEALER_CONTAINER_CPUS, 1, "TRACEHEALER_CONTAINER_CPUS"),
+      pidsLimit: positiveInt(env.TRACEHEALER_CONTAINER_PIDS_LIMIT, 128, "TRACEHEALER_CONTAINER_PIDS_LIMIT"),
+      uid: positiveInt(env.TRACEHEALER_CONTAINER_UID, 1000, "TRACEHEALER_CONTAINER_UID"),
+      gid: positiveInt(env.TRACEHEALER_CONTAINER_GID, 1000, "TRACEHEALER_CONTAINER_GID"),
+    },
   };
 }
 
