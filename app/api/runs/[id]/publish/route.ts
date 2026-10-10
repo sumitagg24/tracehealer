@@ -1,8 +1,10 @@
 import { NextResponse } from "next/server";
-import { assertSameOrigin, enforceRateLimit, jsonError, noStore } from "@/lib/http";
+import { assertSameOrigin, jsonError, noStore } from "@/lib/http";
 import { authorize } from "@/lib/auth";
+import { assertRateLimit } from "@/lib/rate-limit";
 import { publishDraftPullRequest } from "@/lib/github";
-import { getHealingRun, readArtifactRelative, saveHealingRun } from "@/lib/store";
+import { readRun, saveRunForTenant } from "@/lib/run-read";
+import { readArtifactRelative } from "@/lib/store";
 import type { HealResult } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -33,10 +35,10 @@ Local sandbox commit: \`${run.artifacts?.localCommit ?? "unavailable"}\`
 export async function POST(request: Request, context: { params: Promise<{ id: string }> }) {
   try {
     assertSameOrigin(request);
-    authorize(request, "run:publish");
-    enforceRateLimit(`publish:${(await context.params).id}`, 10, 60_000);
+    const session = authorize(request, "run:publish");
+    await assertRateLimit(`publish:${(await context.params).id}`, { limit: 10, windowMs: 60_000 });
     const { id } = await context.params;
-    const run = await getHealingRun(id);
+    const run = await readRun(session.tenantId, id);
     if (!run) {
       return NextResponse.json({ ok: false, code: "not-found", error: "Healing run not found" }, { status: 404 });
     }
@@ -79,7 +81,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
         messages: run.delivery?.messages ?? [],
       },
     };
-    await saveHealingRun(updated);
+    await saveRunForTenant(session.tenantId, updated);
     return NextResponse.json({ ok: true, run: updated }, { headers: noStore() });
   } catch (error) {
     return jsonError(error, noStore());

@@ -9,9 +9,9 @@ export const dynamic = "force-dynamic";
 /** Server-owned progress: state, audit events, and the finished result if any. */
 export async function GET(_request: Request, context: { params: Promise<{ id: string }> }) {
   try {
-    authorize(_request, "run:read");
+    const session = authorize(_request, "run:read");
     const { id } = await context.params;
-    const progress = await getRunProgress(id);
+    const progress = await getRunProgress(id, session.tenantId);
     if (!progress) {
       return NextResponse.json({ ok: false, code: "not-found", error: "Healing run not found" }, { status: 404 });
     }

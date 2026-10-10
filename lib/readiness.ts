@@ -3,9 +3,10 @@ import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { NextResponse } from "next/server";
 import { integrationStatus } from "@/lib/integrations";
-import { asTraceHealerError } from "@/lib/errors";
+import { asTraceHealerError, TraceHealerError } from "@/lib/errors";
 import { noStore } from "@/lib/http";
 import { loadPolicy } from "@/lib/policy";
+import { configuredPersistence, dataRoot, durableHealth } from "@/lib/db";
 
 /**
  * Single readiness implementation shared by the canonical `/api/ready` route and
@@ -15,18 +16,26 @@ import { loadPolicy } from "@/lib/policy";
 export async function buildReadinessResponse(): Promise<NextResponse> {
   try {
     const policy = loadPolicy();
-    const dataRoot = process.env.TRACEHEALER_DATA_DIR ?? path.join(process.cwd(), ".tracehealer-data");
-    const probe = path.join(dataRoot, `.ready-${randomUUID()}`);
-    await mkdir(dataRoot, { recursive: true });
+    const root = dataRoot();
+    const probe = path.join(root, `.ready-${randomUUID()}`);
+    await mkdir(root, { recursive: true });
     await writeFile(probe, "ok", "utf8");
     await rm(probe, { force: true });
+
+    // A configured durable dependency must actually answer before we claim ready.
+    const persistence = configuredPersistence();
+    const database = persistence === "sqlite" ? await durableHealth() : null;
+    if (persistence === "sqlite" && !database?.ok) {
+      throw new TraceHealerError("unconfigured", "The durable database dependency is unavailable");
+    }
 
     const integrations = integrationStatus();
     return NextResponse.json(
       {
         status: "ready",
         dataRootWritable: true,
-        persistence: "filesystem",
+        persistence,
+        database,
         policy: {
           allowlistedRepositories: policy.allowedRepositories,
           allowlistedPatchPaths: policy.allowedPatchPaths,

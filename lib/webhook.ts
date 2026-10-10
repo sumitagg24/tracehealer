@@ -1,4 +1,5 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
+import { getDurableStackIfEnabled } from "@/lib/db";
 import { TraceHealerError } from "@/lib/errors";
 
 /** Constant-time HMAC-SHA256 comparison over the unmodified request body. */
@@ -65,3 +66,19 @@ export class ReplayGuard {
 }
 
 export const globalReplayGuard = new ReplayGuard();
+
+/**
+ * Record a delivery and report whether it was already seen.
+ *
+ * With the durable store enabled the ledger is shared by every worker, so a
+ * signature replayed against a second replica is still recognised as a
+ * duplicate. Otherwise the process-local guard is used.
+ */
+export async function observeDelivery(key: string): Promise<boolean> {
+  const stack = await getDurableStackIfEnabled();
+  if (stack) {
+    const first = await stack.state.recordWebhookReplay("neatlogs", key);
+    return !first;
+  }
+  return globalReplayGuard.observe(key);
+}

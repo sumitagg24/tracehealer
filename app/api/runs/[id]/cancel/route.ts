@@ -8,9 +8,9 @@ export const runtime = "nodejs";
 export async function POST(_request: Request, context: { params: Promise<{ id: string }> }) {
   try {
     assertSameOrigin(_request);
-    authorize(_request, "run:cancel");
+    const session = authorize(_request, "run:cancel");
     const { id } = await context.params;
-    const summary = await cancelHealingRun(id);
+    const summary = await cancelHealingRun(id, session.tenantId);
     if (!summary) {
       return NextResponse.json({ ok: false, code: "not-found", error: "Healing run not found" }, { status: 404 });
     }

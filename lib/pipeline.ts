@@ -359,12 +359,20 @@ export async function runHealingPipeline(
     completedAt: new Date().toISOString(),
   };
 
-  await persistResult(deps, result, result.state ?? "healed");
+  // When the run was cancelled or timed out mid-flight the coordinator owns the
+  // terminal state, so the pipeline records its result without settling.
+  await persistResult(deps, result, result.state ?? "healed", options.signal?.aborted === true);
   return result;
 }
 
-async function persistResult(deps: PipelineDeps, result: HealResult, state: RunState) {
+async function persistResult(
+  deps: PipelineDeps,
+  result: HealResult,
+  state: RunState,
+  deferSettlement = false,
+) {
   await deps.runStore.saveRun(result);
+  if (deferSettlement) return;
   await deps.runStore.updateState(result.id, state, result.completedAt);
   await deps.runStore.saveSummary({
     id: result.id,

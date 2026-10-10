@@ -1,5 +1,6 @@
-import { listRunSummaries, readRunEvents } from "@/lib/store";
 import { isTerminal } from "@/lib/run-state";
+import { filesystemRunStore, type RunStore } from "@/lib/providers";
+import { runStoreForTenant } from "@/lib/run-read";
 import type { RunSummary } from "@/lib/types";
 
 export interface ServiceMetrics {
@@ -20,8 +21,11 @@ export interface ServiceMetrics {
  * Metrics are derived only from persisted run records and the append-only audit
  * trail. Nothing here is synthesized: an empty store reports zeros.
  */
-export async function computeMetrics(limit = 100): Promise<ServiceMetrics> {
-  const summaries: RunSummary[] = await listRunSummaries(limit);
+export async function computeMetrics(tenantId?: string, limit = 100): Promise<ServiceMetrics> {
+  const store: RunStore = tenantId
+    ? await runStoreForTenant(tenantId)
+    : filesystemRunStore;
+  const summaries: RunSummary[] = await store.listSummaries(limit);
   const byState: Record<string, number> = {};
   let healed = 0;
   let needsReview = 0;
@@ -46,7 +50,7 @@ export async function computeMetrics(limit = 100): Promise<ServiceMetrics> {
   }
 
   for (const summary of summaries.slice(0, 50)) {
-    const events = await readRunEvents(summary.id);
+    const events = await store.readEvents(summary.id);
     for (const event of events) {
       if (event.state === "delivery-failed") deliveryFailureEvents += 1;
     }

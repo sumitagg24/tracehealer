@@ -8,11 +8,11 @@ import {
   assertSameOrigin,
   clientIp,
   correlationId,
-  enforceRateLimit,
   jsonError,
   noStore,
   readBoundedText,
 } from "@/lib/http";
+import { assertRateLimit } from "@/lib/rate-limit";
 import { getHealingRun, findRunByIdempotencyKey } from "@/lib/store";
 import { authorize } from "@/lib/auth";
 
@@ -28,7 +28,7 @@ export async function POST(request: Request) {
   try {
     authorize(request, "run:create");
     assertSameOrigin(request);
-    enforceRateLimit(`heal:${clientIp(request)}`);
+    await assertRateLimit(`heal:${clientIp(request)}`);
     assertJsonContentType(request);
     const raw = await readBoundedText(request);
     const body = healRequestSchema.parse(raw ? JSON.parse(raw) : {});

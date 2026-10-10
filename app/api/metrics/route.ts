@@ -8,8 +8,8 @@ export const dynamic = "force-dynamic";
 
 export async function GET(request: Request) {
   try {
-    authorize(request, "run:read");
-    const metrics = await computeMetrics();
+    const session = authorize(request, "run:read");
+    const metrics = await computeMetrics(session.tenantId);
     return NextResponse.json({ ok: true, metrics }, { headers: noStore() });
   } catch (error) {
     return jsonError(error, noStore());

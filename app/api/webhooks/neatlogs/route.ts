@@ -5,7 +5,7 @@ import { TraceHealerError } from "@/lib/errors";
 import { startHealingRun } from "@/lib/runs";
 import { findRunByIdempotencyKey } from "@/lib/store";
 import { normalizeTracePayload } from "@/lib/trace-normalizer";
-import { assertFreshTimestamp, globalReplayGuard, verifySignature } from "@/lib/webhook";
+import { assertFreshTimestamp, observeDelivery, verifySignature } from "@/lib/webhook";
 
 export const runtime = "nodejs";
 
@@ -32,7 +32,7 @@ export async function POST(request: Request) {
 
     // Idempotency: a repeated signed delivery returns the existing run.
     const deliveryKey = signature ? `sig:${signature}` : null;
-    if (deliveryKey && globalReplayGuard.observe(deliveryKey)) {
+    if (deliveryKey && (await observeDelivery(deliveryKey))) {
       return NextResponse.json({ ok: true, duplicated: true, ignored: true }, { headers: noStore() });
     }
 

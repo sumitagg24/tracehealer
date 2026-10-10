@@ -250,10 +250,14 @@ describe("prompt 1 — cancellation propagation through the provider boundary", 
 
     expect(await waitFor(() => entered())).toBe(true);
     const first = await cancelHealingRun(started.runId);
-    await waitForState(started.runId, (state) => state === "cancelled");
+    // Settle the run before repeating the cancel, so the assertions observe the
+    // terminal state rather than a transient progress write.
+    await awaitHealingRun(started.runId);
+    const settled = await getRunSummary(started.runId);
 
     const second = await cancelHealingRun(started.runId);
     const third = await cancelHealingRun(started.runId);
+    expect(settled?.state).toBe("cancelled");
     expect(first?.state).toBe("cancelled");
     expect(second?.state).toBe("cancelled");
     expect(third?.state).toBe("cancelled");

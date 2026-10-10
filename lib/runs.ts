@@ -1,15 +1,16 @@
 import { randomUUID } from "node:crypto";
 import { TraceHealerError } from "@/lib/errors";
 import { runHealingPipeline } from "@/lib/pipeline";
-import { createPipelineDeps, type PipelineDeps } from "@/lib/providers";
+import { createPipelineDeps, type PipelineDeps, type RunStore } from "@/lib/providers";
+import { runStoreForTenant } from "@/lib/run-read";
 import { isTerminal, SETTLED_STATES } from "@/lib/run-state";
-import { getHealingRun, getRunSummary, readRunEvents, saveHealingRun, saveRunSummary } from "@/lib/store";
 import type { AgentTrace, AuditEvent, HealResult, RunState, RunSummary } from "@/lib/types";
 
 interface Inflight {
   cancelled: boolean;
   controller: AbortController;
   promise: Promise<HealResult | null>;
+  store: RunStore;
 }
 
 /** Process-local coordination state. Durable truth lives in the run store. */
@@ -21,6 +22,8 @@ export interface StartRunInput {
   idempotencyKey?: string;
   deps?: PipelineDeps;
   timeoutMs?: number;
+  /** Owning tenant. Defaults to the configured local tenant. */
+  tenantId?: string;
 }
 
 export interface StartedRun {
@@ -35,8 +38,15 @@ export interface RunProgress {
   result: HealResult | null;
 }
 
-function depsOf(input: StartRunInput): PipelineDeps {
-  return input.deps ?? createPipelineDeps();
+/** Tenant used when a caller does not supply one (local/demo deployments). */
+export function defaultTenant(): string {
+  return process.env.TRACEHEALER_TENANT_ID ?? "local";
+}
+
+async function resolveDeps(input: StartRunInput): Promise<PipelineDeps> {
+  if (input.deps) return input.deps;
+  const store = await runStoreForTenant(input.tenantId ?? defaultTenant());
+  return createPipelineDeps({ runStore: store });
 }
 
 /**
@@ -44,7 +54,7 @@ function depsOf(input: StartRunInput): PipelineDeps {
  * Returns immediately so the caller can stream real server progress by polling.
  */
 export async function startHealingRun(input: StartRunInput): Promise<StartedRun> {
-  const deps = depsOf(input);
+  const deps = await resolveDeps(input);
 
   if (input.idempotencyKey) {
     const existing = await deps.runStore.findByIdempotencyKey(input.idempotencyKey);
@@ -70,7 +80,12 @@ export async function startHealingRun(input: StartRunInput): Promise<StartedRun>
   };
   await deps.runStore.saveSummary(initial);
 
-  const entry: Inflight = { cancelled: false, controller: new AbortController(), promise: Promise.resolve(null) };
+  const entry: Inflight = {
+    cancelled: false,
+    controller: new AbortController(),
+    promise: Promise.resolve(null),
+    store: deps.runStore,
+  };
   inflight.set(runId, entry);
 
   const timeoutMs = input.timeoutMs ?? Number(process.env.TRACEHEALER_RUN_TIMEOUT_MS ?? 120_000);
@@ -79,6 +94,9 @@ export async function startHealingRun(input: StartRunInput): Promise<StartedRun>
     let timedOut = false;
     const timer = setTimeout(() => {
       timedOut = true;
+      // Stopping the work at the deadline keeps the terminal decision with the
+      // coordinator instead of racing a pipeline that already finished.
+      entry.controller.abort();
     }, timeoutMs);
 
     try {
@@ -96,13 +114,13 @@ export async function startHealingRun(input: StartRunInput): Promise<StartedRun>
 
       if (timedOut) {
         const reconciled = { ...result, state: "timed-out" as RunState, completedAt: new Date().toISOString() };
-        await saveHealingRun(reconciled);
+        await deps.runStore.saveRun(reconciled);
         await deps.runStore.updateState(runId, "timed-out", reconciled.completedAt);
         return reconciled;
       }
       if (entry.cancelled) {
         const reconciled = { ...result, state: "cancelled" as RunState, completedAt: new Date().toISOString() };
-        await saveHealingRun(reconciled);
+        await deps.runStore.saveRun(reconciled);
         await deps.runStore.updateState(runId, "cancelled", reconciled.completedAt);
         return reconciled;
       }
@@ -132,37 +150,42 @@ export async function startHealingRun(input: StartRunInput): Promise<StartedRun>
 }
 
 /** Wait for an in-flight run to settle. Used by tests and synchronous callers. */
-export async function awaitHealingRun(runId: string): Promise<HealResult | null> {
+export async function awaitHealingRun(runId: string, tenantId?: string): Promise<HealResult | null> {
   const entry = inflight.get(runId);
-  if (!entry) return getHealingRun(runId);
-  await entry.promise;
-  return getHealingRun(runId);
+  if (entry) {
+    await entry.promise;
+    return entry.store.getRun(runId);
+  }
+  const store = await runStoreForTenant(tenantId ?? defaultTenant());
+  return store.getRun(runId);
 }
 
 export function isRunActive(runId: string): boolean {
   return inflight.has(runId);
 }
 
-export async function cancelHealingRun(runId: string): Promise<RunSummary | null> {
+export async function cancelHealingRun(runId: string, tenantId?: string): Promise<RunSummary | null> {
   const entry = inflight.get(runId);
   if (entry) {
     entry.cancelled = true;
     // Abort propagates to the sandbox provider so in-flight work stops promptly.
     entry.controller.abort();
   }
-  const summary = await getRunSummary(runId);
+  const store = entry?.store ?? (await runStoreForTenant(tenantId ?? defaultTenant()));
+  const summary = await store.getSummary(runId);
   if (!summary) return null;
   if (isTerminal(summary.state)) return summary;
   const cancelled: RunSummary = { ...summary, state: "cancelled", completedAt: new Date().toISOString() };
-  await saveRunSummary(cancelled);
+  await store.saveSummary(cancelled);
   return cancelled;
 }
 
-export async function getRunProgress(runId: string): Promise<RunProgress | null> {
+export async function getRunProgress(runId: string, tenantId?: string): Promise<RunProgress | null> {
+  const store = await runStoreForTenant(tenantId ?? defaultTenant());
   const [summary, events, result] = await Promise.all([
-    getRunSummary(runId),
-    readRunEvents(runId),
-    getHealingRun(runId),
+    store.getSummary(runId),
+    store.readEvents(runId),
+    store.getRun(runId),
   ]);
   if (!summary && !result) return null;
   return { summary, events, result };
@@ -172,12 +195,14 @@ export async function getRunProgress(runId: string): Promise<RunProgress | null>
 export async function recoverStaleRuns(
   summaries: RunSummary[],
   activeIds: Set<string> = new Set(inflight.keys()),
+  tenantId?: string,
 ): Promise<RunSummary[]> {
+  const store = await runStoreForTenant(tenantId ?? defaultTenant());
   const recovered: RunSummary[] = [];
   for (const summary of summaries) {
     if (SETTLED_STATES.has(summary.state) || activeIds.has(summary.id)) continue;
     const updated = { ...summary, state: "needs-review" as RunState, completedAt: new Date().toISOString() };
-    await saveRunSummary(updated);
+    await store.saveSummary(updated);
     recovered.push(updated);
   }
   return recovered;
