@@ -1,0 +1,9 @@
+.git
+.github
+.next
+.tracehealer-data
+node_modules
+*.log
+.env
+.env.local
+coverage

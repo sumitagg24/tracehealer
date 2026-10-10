@@ -21,7 +21,15 @@ The demo is designed around a visually obvious before/after loop, not a feature 
 - [x] Executable exact-input replay and contract regression suite
 - [x] Before/after verification report
 - [x] Typed heal API and signed webhook endpoint
-- [x] Approval-gated GitHub draft PR adapter
+- [x] Actual isolated workspace with before-failure reproduction
+- [x] Real git diff, after-tests, local commit, and downloadable artifacts
+- [x] Native/wrapped/OTLP trace normalization
+- [x] Repository context graph and impacted-test discovery
+- [x] Atomic audit persistence and run APIs
+- [x] Approval-gated automatic/manual GitHub draft PR delivery
+- [x] Optional after-trace export and Slack delivery
+- [x] Complete control-center navigation and integration readiness UI
+- [x] Docker image, persistent volume, healthcheck, and operations guide
 - [x] Tests, lint, strict typecheck, production build
 - [x] Demo script and architecture docs
 

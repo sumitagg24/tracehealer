@@ -1,22 +1,39 @@
 # TraceHealer
 
-> **Failure trace → root cause → minimal patch → deterministic replay → review-ready PR**
+> **Failure trace → reproduced bug → repository context → minimal patch → sandbox verification → review-ready draft**
 
-TraceHealer is an autonomous incident-response agent for production AI agents. It consumes a failed trace, identifies the first actionable application failure, maps it to source code, proposes the smallest safe patch, and replays the exact failed input before a human reviews the change.
+TraceHealer is an autonomous incident-response system for production AI agents. It turns structured runtime evidence into a tested software change while keeping publication and merge behind explicit safety gates.
 
-Built for **neatHack** around one sharp demo: an Order API schema change crashes a support agent, causes a three-attempt retry loop, and wastes 4,280 tokens. TraceHealer contains it in seconds and proves the improvement.
+The included neatHack scenario is fully executable: Order API v3 moves a customer email field, a support agent crashes and retries three times, and TraceHealer reproduces the failure, repairs the target in an isolated workspace, runs four regressions, commits the verified fix locally, persists the evidence, and optionally delivers a draft GitHub PR and after-trace.
 
-## What is working
+## Complete working flow
 
-- Polished incident workbench with span waterfall, inspector, diagnosis, patch diff, and verification report
-- Typed `POST /api/heal` API and neatlogs-compatible failure webhook
-- Deterministic root-cause engine for schema drift, malformed JSON, timeouts, and rate limits
-- **Real executable replay** of the failed Order API payload plus legacy, v3, and missing-field regression cases
-- Before/after evidence: 6.84s → 820ms, 4,280 → 612 tokens, $0.0284 → $0.0041
-- HMAC webhook verification when `NEATLOGS_WEBHOOK_SECRET` is configured
-- Isolated GitHub draft-PR publisher that can only be called after explicit approval
-- Responsive interface, health endpoint, strict TypeScript, linting, unit tests, and production build
-- Zero-secret demo mode for a reliable hackathon presentation
+1. **Intake** — native TraceHealer JSON, wrapped neatlogs events, or OTLP JSON enters through a validated API/webhook.
+2. **Reproduce** — the target repository fixture is copied to a unique workspace; the original tests and failed production replay must fail as expected.
+3. **Diagnose** — TraceHealer selects the actionable error span, classifies it, extracts the stack frame, and builds a local repository context graph.
+4. **Patch** — a one-file compatibility repair is applied to the isolated checkout.
+5. **Verify** — the exact failed payload, legacy contract, current contract, and typed-error behavior run through `node --test`.
+6. **Commit** — only a green repair is committed in the workspace; a real git patch and machine-readable report are saved.
+7. **Persist** — the run, logs, metrics, context, commit, delivery state, and artifact paths are atomically recorded.
+8. **Deliver** — when configured, TraceHealer exports the verified run, sends Slack evidence, and creates a **draft** GitHub PR. It never merges.
+
+No secret is required for steps 1–7.
+
+## Features
+
+- Production-style control center, incident queue, trace waterfall, diagnosis, diff review, healing runs, evaluations, repositories, and integration pages
+- Deterministic classifiers for schema drift, malformed JSON, timeouts, rate limits, and unknown application errors
+- Native and OTLP trace normalization with runtime validation
+- HMAC-SHA256 webhook authentication
+- Actual before/after subprocess execution with timeouts and bounded logs
+- Failure-reproduction gate and four executable regressions
+- Local repository graph and impacted-test discovery
+- Generated patch and JSON report download endpoints
+- Filesystem audit store with atomic writes and run retrieval APIs
+- Automatic or manual draft-PR delivery after verification
+- Optional after-trace export and Slack notifications
+- Secret-safe integration readiness endpoint
+- Docker production image, persistent volume, healthcheck, CI, security headers, tests, and responsive UI
 
 ## Quick start
 
@@ -26,9 +43,7 @@ cp .env.example .env.local
 npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) and click **Heal incident**. No external API key is needed for the full demo path.
-
-Quality checks:
+Open [http://localhost:3000](http://localhost:3000), inspect the red span, and click **Heal incident**. The server performs the real reproduce/patch/test/commit pipeline and exposes the resulting patch and verification artifacts in the UI.
 
 ```bash
 npm run typecheck
@@ -37,54 +52,86 @@ npm test
 npm run build
 ```
 
-## Demo flow
+## Docker
 
-1. The incident opens on the failed `order.normalize` span.
-2. The trace shows `tool.lookup_order` succeeded with API v3, then `customer.email` threw.
-3. Click **Heal incident** (or press `⌘/Ctrl + Enter`).
-4. TraceHealer isolates `src/agents/order-support.ts:47`, proposes a compatibility guard, and runs four deterministic checks.
-5. The verification report shows the before/after latency, token, cost, and error deltas.
-6. Click **Review proposed patch** to inspect the exact one-file diff.
+```bash
+cp .env.example .env
+# Add optional integration secrets.
+docker compose up --build
+```
 
-See [`docs/DEMO_SCRIPT.md`](docs/DEMO_SCRIPT.md) for a 90-second submission script.
+Runtime evidence is stored in the `tracehealer-data` volume. See [`docs/OPERATIONS.md`](docs/OPERATIONS.md).
+
+## Demo proof
+
+The target fixture starts vulnerable:
+
+```bash
+cd fixtures/target-agent
+node --test # exits non-zero: 3 failures
+```
+
+A TraceHealer run uses a copy, never modifies the fixture, and produces:
+
+- before test exit: `1`;
+- after test exit: `0`;
+- four passing regression checks;
+- one real git commit in the isolated workspace;
+- `.patch` and verification JSON artifacts;
+- before/after profile: 6.842s → 820ms, 4,280 → 612 tokens, $0.0284 → $0.0041.
+
+The profile values come from the scenario replay program; subprocess wall-clock time and TAP logs are preserved separately in the report.
 
 ## Architecture
 
 ```text
-neatlogs failed trace / webhook
-             │
-             ▼
-     trace validation (Zod)
-             │
-             ▼
-  failure selection + classification
-             │
-             ▼
- source location + evidence chain
-             │
-             ▼
-      minimal patch proposal
-             │
-             ▼
- exact-input replay + regression suite
-             │
-       ┌─────┴─────┐
-       │           │
-    failed       passed
-       │           │
-  needs review   draft PR proposal
-                   │
-                   ▼
-              human approval
+native / neatlogs / OTLP trace
+              │
+      signature + validation
+              │
+              ▼
+  failure selection and diagnosis
+              │
+              ▼
+ isolated repository workspace ─── context graph
+              │
+     reproduce original failure
+              │
+              ▼
+       apply minimal repair
+              │
+              ▼
+ exact-input replay + regression tests
+              │
+       ┌──────┴──────┐
+       │             │
+    failure        all green
+       │             │
+ needs-review    local git commit
+                     │
+             persist artifacts/audit
+                     │
+          ┌──────────┼──────────┐
+          ▼          ▼          ▼
+      draft PR   after-trace   Slack
 ```
 
-The deterministic demo engine lives in `lib/engine.ts`; the executable target and replay harness live in `fixtures/demo-agent` and `lib/replay.ts`. Diagnosis and mutation are deliberately separated: `lib/github.ts` cannot run as a side effect of trace ingestion.
+Core modules:
 
-A production version can swap the deterministic patch strategy for an LLM/repository-graph adapter while preserving the same typed engine contract and verification gate. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+- `lib/pipeline.ts` — orchestration and delivery gate
+- `lib/sandbox.ts` — workspace, commands, patch, tests, and local commit
+- `lib/engine.ts` — failure selection, diagnosis, and patch policy
+- `lib/trace-normalizer.ts` — native/wrapped/OTLP intake
+- `lib/context.ts` — local repository graph
+- `lib/store.ts` — atomic audit persistence
+- `lib/github.ts` — draft-only GitHub publication
+- `lib/integrations.ts` — after-trace and Slack delivery
+
+See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for boundaries and production scaling.
 
 ## API
 
-### Start a healing run
+### Run the complete pipeline
 
 ```bash
 curl -X POST http://localhost:3000/api/heal \
@@ -92,9 +139,9 @@ curl -X POST http://localhost:3000/api/heal \
   -d '{"mode":"demo"}'
 ```
 
-Pass `{ "trace": <AgentTrace>, "mode": "connected" }` to analyze a custom trace. An unsupported trace is diagnosed but remains `needs-review` until a deterministic replay fixture exists.
+A native custom trace can be supplied as `trace`. Unsupported repository/failure strategies return `needs-review` with zero fabricated improvement.
 
-### Receive a failed trace
+### Receive native or OTLP failure events
 
 ```bash
 curl -X POST http://localhost:3000/api/webhooks/neatlogs \
@@ -102,58 +149,57 @@ curl -X POST http://localhost:3000/api/webhooks/neatlogs \
   -d '{"type":"trace.failed","trace":{...}}'
 ```
 
-When `NEATLOGS_WEBHOOK_SECRET` is set, include:
+If `NEATLOGS_WEBHOOK_SECRET` is set, include `x-neatlogs-signature: sha256=<hex HMAC>`.
 
-```text
-x-neatlogs-signature: sha256=<HMAC-SHA256 of raw request body>
-```
-
-### Health
+### Audit and artifacts
 
 ```bash
-curl http://localhost:3000/api/health
+curl http://localhost:3000/api/runs
+curl http://localhost:3000/api/runs/<run-id>
+curl http://localhost:3000/api/artifacts/<run-id>/patch
+curl http://localhost:3000/api/artifacts/<run-id>/report
+curl -X POST http://localhost:3000/api/runs/<run-id>/publish
 ```
 
-## Environment
+Additional endpoints: `/api/health`, `/api/incidents`, `/api/integrations`.
 
-All variables are optional for demo mode. Copy `.env.example` for the complete list.
+## Connected delivery
+
+All variables are optional for the complete local flow.
 
 | Variable | Purpose |
 |---|---|
-| `NEATLOGS_WEBHOOK_SECRET` | Verify incoming trace webhooks |
-| `NEXT_PUBLIC_NEATLOGS_DASHBOARD_URL` | Base URL for future deep links |
-| `GITHUB_TOKEN` | Fine-grained token for the target demo repository |
-| `GITHUB_OWNER` / `GITHUB_REPO` | Target repository for draft PRs |
-| `GITHUB_BASE_BRANCH` | PR base; defaults to `main` |
-| `OPENAI_API_KEY` / `OPENAI_MODEL` | Reserved model-provider adapter configuration |
+| `TRACEHEALER_DATA_DIR` | Persistent run/workspace/artifact root |
+| `NEATLOGS_WEBHOOK_SECRET` | Verify failed-trace intake |
+| `NEATLOGS_EXPORT_URL` / `NEATLOGS_API_KEY` | Export verified after-run evidence |
+| `GITHUB_TOKEN` | Fine-grained target-repository token |
+| `GITHUB_OWNER` / `GITHUB_REPO` | Separate target agent repository |
+| `GITHUB_BASE_BRANCH` | Draft PR base, default `main` |
+| `AUTO_PUBLISH_DRAFT` | Publish a verified draft during the run |
+| `SLACK_WEBHOOK_URL` | Send verified-run notification |
+| `OPENAI_API_KEY` / `OPENAI_MODEL` | Reserved optional generic strategy provider |
+| `ENTIRE_API_URL` / `ENTIRE_API_KEY` | Reserved optional external graph provider |
 
-Use a GitHub token scoped only to the target demo repository. TraceHealer never merges automatically.
+The exact neatlogs ingest URL is configurable rather than invented. Point it at the endpoint/schema supplied for your project. GitHub must point at a separate demo target containing `src/order-support.mjs`.
 
-## Repository map
+## Safety model
 
-```text
-app/                         Next.js UI and API routes
-components/                  Incident workbench and brand UI
-fixtures/demo-agent/         Executable vulnerable/healed target logic
-lib/engine.ts                Diagnosis, patch and verification orchestration
-lib/replay.ts                Exact-input deterministic replay suite
-lib/github.ts                Approval-gated draft PR publisher
-lib/schema.ts                Runtime request and trace validation
-lib/*.test.ts                Engine tests
-docs/                        Plan, architecture and demo script
-```
+1. Incoming payloads cannot select commands or local filesystem paths.
+2. The observed failure must reproduce before any patch is trusted.
+3. No green replay means no publication.
+4. The default strategy runs a fixed, bounded test command in a copied workspace.
+5. GitHub publication creates a draft only; TraceHealer never merges.
+6. Unsupported traces remain `needs-review` and receive no fabricated after metrics.
+7. Tokens, URLs, raw credentials, and secrets never appear in status responses.
 
-## Safety principles
+For untrusted arbitrary customer repositories, run each workspace in a disposable container or microVM as described in the operations guide.
 
-1. **Read first, write later.** Trace intake never mutates a repository.
-2. **No green replay, no PR.** Unsupported traces stay `needs-review`.
-3. **Small patches.** One failure fingerprint, one focused proposal.
-4. **Human merge gate.** Publishing creates drafts; merging is never automated.
-5. **Evidence attached.** Every proposal carries trace, diagnosis, tests, and before/after metrics.
+## Documentation
 
-## Hackathon plan
-
-The execution plan, sponsor integration boundaries, judging evidence, and post-hackathon roadmap are in [`docs/HACKATHON_PLAN.md`](docs/HACKATHON_PLAN.md).
+- [`docs/DEMO_SCRIPT.md`](docs/DEMO_SCRIPT.md) — 90-second judging script
+- [`docs/HACKATHON_PLAN.md`](docs/HACKATHON_PLAN.md) — execution and judging checklist
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — design and production adapters
+- [`docs/OPERATIONS.md`](docs/OPERATIONS.md) — Docker, persistence, endpoints, and hardening
 
 ## License
 

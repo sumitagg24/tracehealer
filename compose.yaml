@@ -1,0 +1,23 @@
+services:
+  tracehealer:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: production
+      TRACEHEALER_DATA_DIR: /data
+      NEATLOGS_WEBHOOK_SECRET: ${NEATLOGS_WEBHOOK_SECRET:-}
+      NEATLOGS_EXPORT_URL: ${NEATLOGS_EXPORT_URL:-}
+      NEATLOGS_API_KEY: ${NEATLOGS_API_KEY:-}
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      GITHUB_OWNER: ${GITHUB_OWNER:-}
+      GITHUB_REPO: ${GITHUB_REPO:-}
+      GITHUB_BASE_BRANCH: ${GITHUB_BASE_BRANCH:-main}
+      AUTO_PUBLISH_DRAFT: ${AUTO_PUBLISH_DRAFT:-false}
+      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
+    volumes:
+      - tracehealer-data:/data
+    restart: unless-stopped
+
+volumes:
+  tracehealer-data:
