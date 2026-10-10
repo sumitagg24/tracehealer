@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  push:
+    branches: [main, arena/4f9c366e-tracehealer]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --legacy-peer-deps
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm test
+      - run: npm run build
