@@ -28,6 +28,20 @@ Set server-side environment variables to add delivery after the same verificatio
 
 Delivery failures are recorded but do not erase a valid verification result. They can be retried separately.
 
+## Running a production build
+
+The build uses `output: "standalone"`. Next.js warns that `next start` is not the
+supported runner for standalone output; start the emitted server directly:
+
+```bash
+npm run build
+node .next/standalone/server.js   # honors HOSTNAME and PORT
+```
+
+The Docker image already does this (`CMD ["node", "server.js"]`). `npm run dev`
+remains the way to develop, and `npm start` still serves locally but prints that
+standalone warning.
+
 ## Docker
 
 ```bash
