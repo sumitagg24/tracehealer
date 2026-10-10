@@ -52,6 +52,12 @@ export interface SandboxRunInput {
   workspaceId: string;
   proposal: PatchProposal;
   dataRoot?: string;
+  /**
+   * Cancellation signal owned by the run coordinator. A provider that can abort
+   * in-flight work (kill a child process, stop a container) must observe it and
+   * return or throw promptly so cancellation propagates through the boundary.
+   */
+  signal?: AbortSignal;
 }
 
 export interface SandboxProvider {
@@ -118,8 +124,8 @@ export const localGraphContextProvider: RepositoryContextProvider = {
 
 export const localProcessSandbox: SandboxProvider = {
   id: "local-process",
-  run: ({ trace, workspaceId, proposal, dataRoot }) =>
-    executeDemoSandbox(trace, { workspaceId, dataRoot, proposal }),
+  run: ({ trace, workspaceId, proposal, dataRoot, signal }) =>
+    executeDemoSandbox(trace, { workspaceId, dataRoot, proposal, signal }),
 };
 
 export const filesystemRunStore: RunStore = {

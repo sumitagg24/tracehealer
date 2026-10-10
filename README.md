@@ -141,7 +141,15 @@ curl -X POST http://localhost:3000/api/heal \
   -d '{"mode":"demo"}'
 ```
 
-A native custom trace can be supplied as `trace`. Unsupported repository/failure strategies return `needs-review` with zero fabricated improvement.
+A native custom trace can be supplied as `trace`. `mode` is **required**: send
+`{"mode":"demo"}` for the deterministic demo or `{"mode":"connected","trace":{...}}`
+for a real trace. An empty body is rejected with `400 invalid-input` and never
+silently starts the seeded demo. Unsupported repository/failure strategies
+return `needs-review` with zero fabricated improvement.
+
+Status codes: `400 invalid-input` (malformed JSON, bad schema, wrong content
+type), `403 invalid-origin` (cross-origin mutation), `413 payload-too-large`
+(oversized body), `429 rate-limited`.
 
 ### Receive native or OTLP failure events
 
@@ -176,8 +184,9 @@ curl http://localhost:3000/api/artifacts/<run-id>/report
 curl -X POST http://localhost:3000/api/runs/<run-id>/publish
 ```
 
-Additional endpoints: `/api/health` (liveness), `/api/ready` (readiness),
-`/api/metrics`, `/api/incidents`, `/api/integrations`.
+Additional endpoints: `/api/health` (liveness), `/api/ready` (canonical
+readiness), `/api/readiness` (compatibility alias returning the identical
+payload), `/api/metrics`, `/api/incidents`, `/api/integrations`.
 
 ## Provider architecture
 

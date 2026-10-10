@@ -12,8 +12,14 @@ export interface RunOptions {
   idempotencyKey?: string;
   correlationId?: string;
   runId?: string;
-  /** Called on every state transition so the coordinator can persist progress. */
-  onState?: (state: RunState) => void;
+  /** Cancellation signal that must reach the sandbox provider and delivery gate. */
+  signal?: AbortSignal;
+  /**
+   * Called on every state transition so the coordinator can persist progress.
+   * The return value is awaited, which serializes progress writes with the
+   * pipeline so the coordinator's final terminal write is always last.
+   */
+  onState?: (state: RunState) => unknown;
 }
 
 function pullRequestBody(result: HealResult) {
@@ -61,7 +67,7 @@ export async function runHealingPipeline(
   let seq = 0;
 
   const record = async (next: RunState, message: string, detail?: Record<string, unknown>) => {
-    options.onState?.(next);
+    await options.onState?.(next);
     const event: AuditEvent = {
       seq: (seq += 1),
       at: new Date().toISOString(),
@@ -79,6 +85,11 @@ export async function runHealingPipeline(
       // Audit persistence must never break a verified run.
     }
   };
+
+  const signal = options.signal;
+  if (signal?.aborted) {
+    throw new TraceHealerError("cancelled", "Run cancelled before it started");
+  }
 
   const base = healTrace(trace, mode);
   await record("reproducing", "Healing request accepted; preparing isolated workspace", {
@@ -173,7 +184,7 @@ export async function runHealingPipeline(
     await record("verifying", "Reproducing failure and running verification in isolation", {
       file: proposal.file,
     });
-    sandbox = await deps.sandbox.run({ trace, workspaceId: runId, proposal });
+    sandbox = await deps.sandbox.run({ trace, workspaceId: runId, proposal, signal });
   } catch (error) {
     const failure = asTraceHealerError(error, "Sandbox execution failed");
     const terminal: RunState = "needs-review";
@@ -294,6 +305,10 @@ export async function runHealingPipeline(
     completedAt: new Date().toISOString(),
   };
 
+  if (signal?.aborted) {
+    throw new TraceHealerError("cancelled", "Run cancelled before delivery");
+  }
+
   const autoPublish = process.env.AUTO_PUBLISH_DRAFT === "true";
   if (passed && deps.pullRequest.configured() && autoPublish) {
     await record("publishing", "Publishing verified draft pull request");
@@ -320,6 +335,10 @@ export async function runHealingPipeline(
   } else if (passed) {
     await record("healed", "Verified repair committed locally and ready for review");
     result = { ...result, state: "healed" };
+  }
+
+  if (signal?.aborted) {
+    throw new TraceHealerError("cancelled", "Run cancelled before notification delivery");
   }
 
   const [neatlogsDelivery, slackDelivery] = await Promise.all([

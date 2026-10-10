@@ -57,10 +57,11 @@ The image includes Node and git, runs as an unprivileged user, exposes port 3000
 | Method | Path | Purpose |
 |---|---|---|
 | `GET` | `/api/health` | Liveness and capability report |
-| `GET` | `/api/ready` | Readiness: config parses, data root writable |
+| `GET` | `/api/ready` | Canonical readiness: config parses, data root writable |
+| `GET` | `/api/readiness` | Compatibility alias; identical status/payload/headers to `/api/ready` |
 | `GET` | `/api/metrics` | Service metrics derived from persisted runs |
-| `POST` | `/api/heal` | Run the full pipeline synchronously; native trace optional; supports `idempotencyKey` |
-| `POST` | `/api/runs` | Create a run asynchronously (202); supports `idempotencyKey` |
+| `POST` | `/api/heal` | Run the full pipeline synchronously; requires explicit `mode`; supports `idempotencyKey` |
+| `POST` | `/api/runs` | Create a run asynchronously (202); requires explicit `mode`; supports `idempotencyKey` |
 | `GET` | `/api/runs` | Persisted healing-run summaries |
 | `GET` | `/api/runs/:id` | One complete healing record with audit events |
 | `GET` | `/api/runs/:id/progress` | Server-owned state, events, and result for polling |

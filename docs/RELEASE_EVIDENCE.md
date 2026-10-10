@@ -58,8 +58,12 @@ artifacts none
 
 | Case | Result |
 |---|---|
-| `POST /api/runs` with `Origin: https://evil.example` | `403` |
-| `POST /api/runs` with `Content-Type: text/plain` | `400` |
+| `POST /api/runs` with `Origin: https://evil.example` | `403 invalid-origin` |
+| `POST /api/runs` with `Content-Type: text/plain` | `400 invalid-input` |
+| `POST /api/runs` with `{}` (no explicit mode) | `400 invalid-input` |
+| `POST /api/runs` with malformed JSON | `400 invalid-input` |
+| `POST /api/runs` with an oversized body | `413 payload-too-large` |
+| `GET /api/readiness` | identical status/payload/headers to `/api/ready` |
 | `GET /api/artifacts/../../package.json/patch` | `404` |
 | `POST /api/runs/:id/publish` (GitHub unconfigured) | `503 unconfigured` |
 | Webhook native `trace.failed` | `202` |

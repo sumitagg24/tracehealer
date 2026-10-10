@@ -7,6 +7,8 @@
  */
 export type TraceHealerErrorCode =
   | "invalid-input"
+  | "invalid-origin"
+  | "payload-too-large"
   | "unconfigured"
   | "policy-rejected"
   | "reproduction-failed"
@@ -21,6 +23,8 @@ export type TraceHealerErrorCode =
 
 const DEFAULT_STATUS: Record<TraceHealerErrorCode, number> = {
   "invalid-input": 400,
+  "invalid-origin": 403,
+  "payload-too-large": 413,
   unconfigured: 503,
   "policy-rejected": 422,
   "reproduction-failed": 422,

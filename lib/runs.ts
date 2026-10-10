@@ -8,6 +8,7 @@ import type { AgentTrace, AuditEvent, HealResult, RunState, RunSummary } from "@
 
 interface Inflight {
   cancelled: boolean;
+  controller: AbortController;
   promise: Promise<HealResult | null>;
 }
 
@@ -69,7 +70,7 @@ export async function startHealingRun(input: StartRunInput): Promise<StartedRun>
   };
   await deps.runStore.saveSummary(initial);
 
-  const entry: Inflight = { cancelled: false, promise: Promise.resolve(null) };
+  const entry: Inflight = { cancelled: false, controller: new AbortController(), promise: Promise.resolve(null) };
   inflight.set(runId, entry);
 
   const timeoutMs = input.timeoutMs ?? Number(process.env.TRACEHEALER_RUN_TIMEOUT_MS ?? 120_000);
@@ -86,9 +87,11 @@ export async function startHealingRun(input: StartRunInput): Promise<StartedRun>
         runId,
         correlationId,
         idempotencyKey: input.idempotencyKey,
-        onState: (state) => {
-          void deps.runStore.updateState(runId, state, isTerminal(state) ? new Date().toISOString() : null);
-        },
+        signal: entry.controller.signal,
+        // Awaited by the pipeline so progress writes are serialized and the
+        // coordinator's terminal decision is never overwritten by a late write.
+        onState: (state) =>
+          deps.runStore.updateState(runId, state, isTerminal(state) ? new Date().toISOString() : null),
       });
 
       if (timedOut) {
@@ -142,7 +145,11 @@ export function isRunActive(runId: string): boolean {
 
 export async function cancelHealingRun(runId: string): Promise<RunSummary | null> {
   const entry = inflight.get(runId);
-  if (entry) entry.cancelled = true;
+  if (entry) {
+    entry.cancelled = true;
+    // Abort propagates to the sandbox provider so in-flight work stops promptly.
+    entry.controller.abort();
+  }
   const summary = await getRunSummary(runId);
   if (!summary) return null;
   if (isTerminal(summary.state)) return summary;

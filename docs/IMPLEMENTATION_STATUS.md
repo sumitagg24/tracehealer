@@ -18,19 +18,22 @@ remains unverified or externally blocked. Statuses are truthful: a capability is
 | Durable run states | `lib/run-state.ts` guarded transitions; `RunState` on every result | `lib/run-state.test.ts` | None found | verified |
 | Append-only audit events | `lib/store.ts` JSONL per run; correlation IDs | `lib/runs.test.ts` | None found | verified |
 | Idempotency (HTTP + webhook) | key/signature lookup across restarts | `lib/runs.test.ts`, HTTP smoke (`deduplicated: true`) | None found | verified |
-| Cancellation / timeout / stale recovery | `lib/runs.ts` coordinator | `lib/runs.test.ts` | Cancellation is cooperative, not mid-subprocess | verified (cooperative) |
+| Cancellation / timeout / stale recovery | `lib/runs.ts` coordinator aborts a provider `AbortSignal`; progress writes are awaited so the terminal decision is last | `lib/runs.test.ts`, `lib/prompt1.test.ts` | Forced termination of arbitrary untrusted code is Prompt 4 | verified |
 | Atomic persistence | per-path write serialization + rename retry | `lib/runs.test.ts` (found and fixed a real Windows EPERM race) | Single-process only | verified |
 | Server-driven UI progress | `POST /api/runs` + polling `/api/runs/:id/progress` | browser sample: Diagnosing → Verifying → Healed | Polling not SSE | verified |
 | UI lifecycle states | loading/empty/error/offline/queued/running/needs-review/delivery-failed/cancelled/timed-out/healed | browser a11y tree + DOM probes | None found | verified |
 | Run detail view | timeline, context, checks, metrics, delivery, artifacts, logs, diff | browser DOM probe (7 events, 4 checks, 6 cards) | None found | verified |
 | Accessibility | landmarks, `role=status` live region, tablist, accessible names, reduced motion, focus-visible | a11y tree; widths 390/768/1024/1440 without overflow | Contrast not audited with a tool | implemented |
 | Dead controls removed | unavailable search/notifications/workspace-switcher are disabled with explanations; copy/filters/nav work | browser DOM probes | None found | verified |
-| Security hardening | same-origin (403), content-type (400), size limits, rate limit (429), CSP + headers | `lib/http.test.ts`, HTTP smoke | Limits are per-process, in-memory | verified |
+| Security hardening | same-origin (`403 invalid-origin`), content-type (`400 invalid-input`), oversized body (`413 payload-too-large`), rate limit (429), CSP + headers | `lib/http.test.ts`, `lib/routes.test.ts`, HTTP smoke | Limits are per-process, in-memory | verified |
+| Explicit run contract | `healRequestSchema` requires explicit `mode`; empty body rejected | `lib/prompt1.test.ts`, `lib/routes.test.ts` | None found | verified |
+| Readiness alias | `/api/ready` canonical; `/api/readiness` shares one implementation | `lib/routes.test.ts` | None found | verified |
+| Cancellation propagation | coordinator aborts a provider-owned `AbortSignal`; delayed provider observes abort and run settles `cancelled` with no commit/delivery | `lib/prompt1.test.ts` | OS-level forced termination of a real untrusted subprocess is Prompt 4 | verified (propagation) |
 | Webhook auth | constant-time HMAC, timestamp tolerance, replay guard | `lib/webhook.test.ts`, HTTP smoke (202/400) | Live neatlogs contract unverified | verified (contract) |
 | Secret/PII redaction | `lib/redact.ts` applied to logs and model context | `lib/redact.test.ts`, smoke (`absolutePathInLog: false`) | Pattern-based, not exhaustive | verified |
 | Sandbox env isolation | `sandboxEnvironment()` forwards only operational variables to child processes | `lib/sandbox.test.ts` | Still no OS-level container boundary | verified |
 | Model patch strategy | `createModelStrategy` strict JSON, policy-gated, off by default | `lib/strategies.test.ts` adversarial cases | Live model provider unverified | implemented |
-| Readiness + metrics | `/api/ready`, `/api/metrics` derived from persisted runs | HTTP smoke | None found | verified |
+| Readiness + metrics | `/api/ready` (canonical) + `/api/readiness` alias, `/api/metrics` derived from persisted runs | HTTP smoke, `lib/routes.test.ts` | None found | verified |
 | Repository context (local graph) | `lib/context.ts` scans the target fixture for files/symbols/tests | pipeline test | Only JS/TS-shaped files | verified |
 | Real remote repository checkout | Not implemented; the target is the local fixture | — | Needs clone/commit pinning + container isolation | blocked (design) |
 | Untrusted-code container boundary | Not implemented; local process provider only | — | Arbitrary third-party code must run in a disposable container | blocked (design) |
