@@ -4,7 +4,6 @@ import os from "node:os";
 import path from "node:path";
 import {
   buildIsolationDockerArgs,
-  CONTAINER_IMAGE,
   CONTAINER_MOUNT_TARGET,
   isolationGuarantees,
   isolationProbes,
