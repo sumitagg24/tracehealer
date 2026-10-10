@@ -1,0 +1,5 @@
+services:
+  tracehealer:
+    environment:
+      TRACEHEALER_AUTH_MODE: local
+      TRACEHEALER_LOCAL_AUTH_ACK: "true"
