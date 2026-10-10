@@ -93,6 +93,7 @@ describe("prompt 1 — POST /api/runs request contract", () => {
     expect(summary?.state).toBe("needs-review");
 
     const run: HealResult | null = await getHealingRun(runId);
+    expect(run, "the persisted run must exist for the unsupported trace").toBeDefined();
     expect(run?.status).toBe("needs-review");
     expect(run?.verification.after).toEqual(run?.verification.before);
     expect(run?.verification.improvements).toEqual({ latencyPercent: 0, tokenPercent: 0, costPercent: 0 });

@@ -1,0 +1,141 @@
+name: desktop
+
+on:
+  push:
+    branches: [feat/tracehealer-full-flow, main]
+  pull_request:
+    branches: [feat/tracehealer-full-flow, main]
+
+jobs:
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --legacy-peer-deps
+      - name: typecheck
+        run: npx tsc --noEmit
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --legacy-peer-deps
+      - name: unit tests
+        run: npx vitest run --config=vitest.config.mts
+      - name: typecheck
+        run: npx tsc --noEmit
+      - name: lint
+        run: npx eslint --no-warn-ignored "lib/**/*.{ts,test.ts}" "app/**/*.{ts,tsx}" "apps/desktop/src/**/*.{ts,tsx,js,mjs}"
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --legacy-peer-deps
+      - run: npx eslint --no-warn-ignored "lib/**/*.{ts,test.ts}" "app/**/*.{ts,tsx}" "apps/desktop/src/**/*.{ts,tsx,js,mjs}"
+
+  build-desktop:
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            target: windows
+          - os: macos-latest
+            target: macos
+          - os: ubuntu-latest
+            target: linux
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --legacy-peer-deps
+      - name: install desktop dependencies
+        working-directory: apps/desktop
+        run: npm ci --legacy-peer-deps
+      - name: desktop typecheck
+        working-directory: apps/desktop
+        run: npx tsc --noEmit
+      - name: desktop unit tests
+        working-directory: apps/desktop
+        run: node --test src/*.test.mjs
+      - name: cargo check
+        working-directory: apps/desktop/src-tauri
+        run: cargo check --verbose
+      - name: build desktop
+        working-directory: apps/desktop
+        run: npx tauri build --target ${{ matrix.target == 'macos' && 'universal-apple-darwin' || matrix.target == 'linux' && 'x86_64-unknown-linux-gnu' || 'x86_64-pc-windows-msvc' }}
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "13.0"
+      - name: compute checksums
+        if: matrix.target != 'macos'
+        run: |
+          cd src-tauri/target/${{ matrix.target == 'windows' && 'x86_64-pc-windows-msvc/release' || matrix.target == 'linux' && 'x86_64-unknown-linux-gnu/release/bundle' || 'release' }}
+          find . -type f -iname "*.msi" -o -iname "*.exe" -o -iname "*.AppImage" -o -iname "*.deb" | while read -r artifact; do
+            sha256sum "$artifact" > "${artifact}.sha256"
+          done
+          find . -type f \( -iname "*.msi" -o -iname "*.exe" -o -iname "*.AppImage" -o -iname "*.deb" -o -iname "*.sha256" \) -exec echo "artifact: $artifact" \;
+      - name: upload windows artifacts
+        if: matrix.target == 'windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: tracehealer-desktop-windows
+          path: |
+            apps/desktop/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi
+            apps/desktop/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+          if-no-files-found: warn
+      - name: upload macos artifacts
+        if: matrix.target == 'macos'
+        uses: actions/upload-artifact@v4
+        with:
+          name: tracehealer-desktop-macos
+          path: |
+            src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+            src-tauri/target/universal-apple-darwin/release/bundle/app/*.app
+          if-no-files-found: warn
+      - name: upload linux artifacts
+        if: matrix.target == 'linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: tracehealer-desktop-linux
+          path: |
+            src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.AppImage
+            src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/deb/*.deb
+          if-no-files-found: warn
+
+  release-artifacts:
+    needs: [build-desktop]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: tracehealer-desktop-*
+          merge-multiple: true
+      - name: attach release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            *.msi
+            *.exe
+            *.dmg
+            *.AppImage
+            *.deb
+            *.sha256
+        if: ${{ !env.ACT }}
