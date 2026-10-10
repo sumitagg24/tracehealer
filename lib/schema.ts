@@ -38,4 +38,6 @@ export const agentTraceSchema = z.object({
 export const healRequestSchema = z.object({
   trace: agentTraceSchema.optional(),
   mode: z.enum(["demo", "connected"]).default("demo"),
+  /** Optional caller-supplied key so retries reuse a run instead of mutating twice. */
+  idempotencyKey: z.string().min(8).max(200).optional(),
 });

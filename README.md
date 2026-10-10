@@ -21,7 +21,9 @@ No secret is required for steps 1–7.
 
 ## Features
 
-- Production-style control center, incident queue, trace waterfall, diagnosis, diff review, healing runs, evaluations, repositories, and integration pages
+- Production-style control center, incident queue, trace waterfall, diagnosis, diff review, healing runs, run detail, evaluations, repositories, and integration pages
+- Server-driven progress: async run creation plus polling of real persisted lifecycle states
+- Explicit run state machine, append-only audit events, idempotency, cancellation, timeouts, and stale-run recovery
 - Deterministic classifiers for schema drift, malformed JSON, timeouts, rate limits, and unknown application errors
 - Native and OTLP trace normalization with runtime validation
 - HMAC-SHA256 webhook authentication
@@ -151,6 +153,19 @@ curl -X POST http://localhost:3000/api/webhooks/neatlogs \
 
 If `NEATLOGS_WEBHOOK_SECRET` is set, include `x-neatlogs-signature: sha256=<hex HMAC>`.
 
+### Asynchronous runs (server-driven progress)
+
+```bash
+# Returns 202 immediately with a run id; pass an idempotency key to dedupe.
+curl -X POST http://localhost:3000/api/runs \
+  -H 'Content-Type: application/json' \
+  -d '{"mode":"demo","idempotencyKey":"incident-2841"}'
+
+# Poll real server state (state, audit events, and the finished result).
+curl http://localhost:3000/api/runs/<run-id>/progress
+curl -X POST http://localhost:3000/api/runs/<run-id>/cancel
+```
+
 ### Audit and artifacts
 
 ```bash
@@ -161,7 +176,29 @@ curl http://localhost:3000/api/artifacts/<run-id>/report
 curl -X POST http://localhost:3000/api/runs/<run-id>/publish
 ```
 
-Additional endpoints: `/api/health`, `/api/incidents`, `/api/integrations`.
+Additional endpoints: `/api/health` (liveness), `/api/ready` (readiness),
+`/api/metrics`, `/api/incidents`, `/api/integrations`.
+
+## Provider architecture
+
+Orchestration depends on explicit interfaces in `lib/providers.ts`
+(`TraceProvider`, `RepositoryContextProvider`, `PatchStrategy`, `SandboxProvider`,
+`RunStore`, `PullRequestProvider`, `NotificationProvider`) with a deterministic,
+zero-secret default set. Behavior is injectable for tests, and no domain logic
+reads environment variables directly. Failures use typed, stable error codes
+with a sanitized public message (`lib/errors.ts`).
+
+Runs move through guarded states (`lib/run-state.ts`): `queued → reproducing →
+diagnosing → patching → verifying → committing → publishing → healed`, with
+`needs-review`, `delivery-failed`, `cancelled`, and `timed-out` terminals. An
+append-only audit trail is persisted per run.
+
+## Administrator policy
+
+`lib/policy.ts` restricts healing to an allowlisted repository, allowlisted
+patch paths, and an allowlisted command set, and always protects CI, lockfiles,
+package scripts, and tests. Malformed configuration fails safely. See
+`.env.example` for every `TRACEHEALER_*` setting.
 
 ## Connected delivery
 
@@ -179,6 +216,11 @@ All variables are optional for the complete local flow.
 | `SLACK_WEBHOOK_URL` | Send verified-run notification |
 | `OPENAI_API_KEY` / `OPENAI_MODEL` | Reserved optional generic strategy provider |
 | `ENTIRE_API_URL` / `ENTIRE_API_KEY` | Reserved optional external graph provider |
+| `TRACEHEALER_ALLOWED_REPOSITORIES` / `TRACEHEALER_ALLOWED_PATHS` | Patch/repository allowlist |
+| `TRACEHEALER_ALLOW_MODEL_PATCHES` / `TRACEHEALER_ALLOW_TEST_EDITS` | Explicit opt-ins (both off by default) |
+| `TRACEHEALER_MAX_REQUEST_BYTES` / `TRACEHEALER_RATE_LIMIT` | Request-size and rate limits |
+| `TRACEHEALER_WEBHOOK_TOLERANCE_MS` / `TRACEHEALER_WEBHOOK_REQUIRE_TIMESTAMP` | Webhook freshness and replay window |
+| `TRACEHEALER_RUN_TIMEOUT_MS` / `TRACEHEALER_COMMAND_TIMEOUT_MS` | Run and command deadlines |
 
 The exact neatlogs ingest URL is configurable rather than invented. Point it at the endpoint/schema supplied for your project. GitHub must point at a separate demo target containing `src/order-support.mjs`.
 

@@ -1,3 +1,5 @@
+import { TraceHealerError } from "@/lib/errors";
+
 export interface PullRequestInput {
   path: string;
   content: string;
@@ -46,8 +48,9 @@ async function githubRequest<T>(config: GitHubConfig, path: string, init?: Reque
   });
 
   if (!response.ok) {
-    const detail = await response.text();
-    throw new Error(`GitHub API ${response.status}: ${detail.slice(0, 300)}`);
+    throw new TraceHealerError("delivery-failed", `GitHub API request failed with status ${response.status}`, {
+      detail: (await response.text()).slice(0, 300),
+    });
   }
   return (await response.json()) as T;
 }
@@ -61,7 +64,10 @@ async function githubRequest<T>(config: GitHubConfig, path: string, init?: Reque
 export async function publishDraftPullRequest(input: PullRequestInput): Promise<PullRequestResult> {
   const config = configFromEnvironment();
   if (!config) {
-    throw new Error("GitHub publishing is not configured. Set GITHUB_TOKEN, GITHUB_OWNER and GITHUB_REPO.");
+    throw new TraceHealerError(
+      "unconfigured",
+      "GitHub publishing is not configured. Set GITHUB_TOKEN, GITHUB_OWNER and GITHUB_REPO.",
+    );
   }
 
   const repoPath = `/repos/${config.owner}/${config.repo}`;

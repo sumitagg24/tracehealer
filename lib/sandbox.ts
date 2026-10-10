@@ -1,8 +1,11 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { cp, mkdir, readFile, writeFile } from "node:fs/promises";
+import { cp, mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
+import { TraceHealerError } from "@/lib/errors";
+import { assertAllowedCommand, assertAllowedPatch, isInside, loadPolicy } from "@/lib/policy";
+import type { PatchProposal } from "@/lib/providers";
 import type { AgentTrace, CodePatch, VerificationResult } from "@/lib/types";
 
 const execFileAsync = promisify(execFile);
@@ -59,6 +62,8 @@ export interface SandboxResult {
   workspacePath: string;
   patchFile: string;
   reportFile: string;
+  /** Data-root-relative path to the exact applied source, for safe publication. */
+  appliedFile: string;
   localCommit: string | null;
   patch: CodePatch;
   verification: VerificationResult;
@@ -69,13 +74,24 @@ export interface SandboxResult {
   afterReplay: ReplayProfile;
 }
 
+const DEFAULT_PROPOSAL: PatchProposal = {
+  file: "src/order-support.mjs",
+  content: HEALED_ORDER_SOURCE,
+  title: "Handle Order API v3 contact schema",
+  rationale:
+    "Preserve the legacy customer.email contract, support contact.primaryEmail, and replace the retry-triggering TypeError with a typed contract error.",
+  language: "javascript",
+};
+
 async function run(command: string, args: string[], cwd: string): Promise<CommandResult> {
+  const policy = loadPolicy();
+  assertAllowedCommand(command, policy);
   const started = performance.now();
   try {
     const result = await execFileAsync(command, args, {
       cwd,
-      timeout: 20_000,
-      maxBuffer: 1024 * 1024,
+      timeout: policy.commandTimeoutMs,
+      maxBuffer: policy.maxOutputBytes,
       env: {
         ...process.env,
         CI: "1",
@@ -117,7 +133,7 @@ function percent(before: number, after: number) {
 
 export async function executeDemoSandbox(
   trace: AgentTrace,
-  options: { dataRoot?: string; workspaceId?: string } = {},
+  options: { dataRoot?: string; workspaceId?: string; proposal?: PatchProposal } = {},
 ): Promise<SandboxResult> {
   const workspaceId = options.workspaceId ?? `run_${randomUUID().slice(0, 8)}`;
   const dataRoot = options.dataRoot ?? process.env.TRACEHEALER_DATA_DIR ?? path.join(process.cwd(), ".tracehealer-data");
@@ -125,6 +141,16 @@ export async function executeDemoSandbox(
   const artifactsPath = path.join(dataRoot, "artifacts", workspaceId);
   const fixturePath = path.join(process.cwd(), "fixtures", "target-agent");
 
+  // Defense in depth: the proposal is re-validated even when the pipeline already did.
+  const proposal = options.proposal ?? DEFAULT_PROPOSAL;
+  assertAllowedPatch(proposal);
+  const targetRelative = proposal.file.replaceAll("\\", "/");
+  const targetAbsolute = path.join(workspacePath, ...targetRelative.split("/"));
+  if (!isInside(workspacePath, targetAbsolute)) {
+    throw new TraceHealerError("policy-rejected", "Patch target escapes the workspace");
+  }
+
+  await rm(workspacePath, { recursive: true, force: true });
   await mkdir(path.dirname(workspacePath), { recursive: true });
   await mkdir(artifactsPath, { recursive: true });
   await cp(fixturePath, workspacePath, { recursive: true, force: true });
@@ -140,15 +166,21 @@ export async function executeDemoSandbox(
   const beforeReplay = replayFrom(beforeReplayCommand.stdout);
   const beforeReproduced = beforeTest.exitCode !== 0 && !beforeReplay.success;
   if (!beforeReproduced) {
-    throw new Error("Safety gate stopped: the target workspace did not reproduce the observed failure.");
+    throw new TraceHealerError(
+      "reproduction-failed",
+      "Safety gate stopped: the target workspace did not reproduce the observed failure.",
+    );
   }
 
-  const targetFile = path.join(workspacePath, "src", "order-support.mjs");
-  await writeFile(targetFile, HEALED_ORDER_SOURCE, "utf8");
+  const targetFile = targetAbsolute;
+  await writeFile(targetFile, proposal.content, "utf8");
 
-  const diffResult = await run("git", ["diff", "--", "src/order-support.mjs"], workspacePath);
+  const diffResult = await run("git", ["diff", "--", targetRelative], workspacePath);
   const diff = diffResult.stdout.trim();
-  if (!diff) throw new Error("Patch generation produced no source change.");
+  if (!diff) throw new TraceHealerError("verification-failed", "Patch generation produced no source change.");
+  if (Buffer.byteLength(diff, "utf8") > loadPolicy().maxDiffBytes) {
+    throw new TraceHealerError("policy-rejected", "Generated diff exceeds the maximum size");
+  }
 
   const afterTest = await run("node", ["--test"], workspacePath);
   const afterReplayCommand = await run("node", ["scripts/replay.mjs"], workspacePath);
@@ -157,7 +189,7 @@ export async function executeDemoSandbox(
 
   let localCommit: string | null = null;
   if (passed) {
-    await run("git", ["add", "src/order-support.mjs"], workspacePath);
+    await run("git", ["add", "--", targetRelative], workspacePath);
     const commit = await run(
       "git",
       ["commit", "-q", "-m", "fix(agent): handle Order API v3 contact schema"],
@@ -202,11 +234,10 @@ export async function executeDemoSandbox(
   };
 
   const patch: CodePatch = {
-    file: "src/order-support.mjs",
-    language: "javascript",
-    title: "Handle Order API v3 contact schema",
-    rationale:
-      "Preserve the legacy customer.email contract, support contact.primaryEmail, and replace the retry-triggering TypeError with a typed contract error.",
+    file: targetRelative,
+    language: proposal.language,
+    title: proposal.title,
+    rationale: proposal.rationale,
     diff,
     additions: diff.split("\n").filter((line) => line.startsWith("+") && !line.startsWith("+++")).length,
     deletions: diff.split("\n").filter((line) => line.startsWith("-") && !line.startsWith("---")).length,
@@ -214,6 +245,9 @@ export async function executeDemoSandbox(
 
   const patchFile = path.join(artifactsPath, "change.patch");
   const reportFile = path.join(artifactsPath, "verification.json");
+  const appliedFile = path.join(artifactsPath, "applied", path.basename(targetRelative));
+  await mkdir(path.dirname(appliedFile), { recursive: true });
+  await writeFile(appliedFile, proposal.content, "utf8");
   await writeFile(patchFile, `${diff}\n`, "utf8");
   await writeFile(
     reportFile,
@@ -240,6 +274,7 @@ export async function executeDemoSandbox(
     workspacePath,
     patchFile,
     reportFile,
+    appliedFile: path.join("artifacts", workspaceId, "applied", path.basename(targetRelative)),
     localCommit,
     patch,
     verification,
@@ -249,4 +284,38 @@ export async function executeDemoSandbox(
     beforeReplay,
     afterReplay,
   };
+}
+
+/**
+ * Retention policy: keep the N most recent workspaces and delete older ones so
+ * untrusted checkouts do not accumulate indefinitely. Artifacts are excluded.
+ */
+export async function pruneWorkspaces(
+  options: { dataRoot?: string; keep?: number } = {},
+): Promise<{ removed: string[] }> {
+  const dataRoot = options.dataRoot ?? process.env.TRACEHEALER_DATA_DIR ?? path.join(process.cwd(), ".tracehealer-data");
+  const keep = Math.max(1, options.keep ?? 20);
+  const workspacesRoot = path.join(dataRoot, "workspaces");
+  let entries: string[] = [];
+  try {
+    const names = (await readdir(workspacesRoot)).filter((name) => !name.startsWith("."));
+    const withTimes = await Promise.all(
+      names.map(async (name) => ({
+        name,
+        mtime: (await stat(path.join(workspacesRoot, name))).mtimeMs,
+      })),
+    );
+    entries = withTimes.sort((a, b) => b.mtime - a.mtime).map((entry) => entry.name);
+  } catch {
+    return { removed: [] };
+  }
+
+  const removed: string[] = [];
+  for (const name of entries.slice(keep)) {
+    const target = path.join(workspacesRoot, name);
+    if (!isInside(workspacesRoot, target)) continue;
+    await rm(target, { recursive: true, force: true });
+    removed.push(name);
+  }
+  return { removed };
 }

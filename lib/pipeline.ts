@@ -1,15 +1,19 @@
 import { randomUUID } from "node:crypto";
 import path from "node:path";
-import { buildLocalContextGraph } from "@/lib/context";
+import { asTraceHealerError, TraceHealerError } from "@/lib/errors";
+import { createPipelineDeps, type PipelineDeps } from "@/lib/providers";
+import { redactLog } from "@/lib/redact";
+import { loadPolicy, matchPathGlob } from "@/lib/policy";
 import { healTrace } from "@/lib/engine";
-import { publishDraftPullRequest } from "@/lib/github";
-import { exportHealedTrace, integrationStatus, notifySlack } from "@/lib/integrations";
-import { executeDemoSandbox, HEALED_ORDER_SOURCE } from "@/lib/sandbox";
-import { saveHealingRun } from "@/lib/store";
-import type { AgentTrace, HealResult } from "@/lib/types";
+import type { AgentTrace, AuditEvent, HealResult, RunState } from "@/lib/types";
 
-function relativeArtifact(file: string) {
-  return path.relative(process.cwd(), file).replaceAll("\\", "/");
+export interface RunOptions {
+  deps?: PipelineDeps;
+  idempotencyKey?: string;
+  correlationId?: string;
+  runId?: string;
+  /** Called on every state transition so the coordinator can persist progress. */
+  onState?: (state: RunState) => void;
 }
 
 function pullRequestBody(result: HealResult) {
@@ -38,25 +42,70 @@ ${checks}
 }
 
 /**
- * Executes the complete safe demo pipeline: reproduce, inspect, patch, test,
- * commit locally, persist evidence, optionally publish a draft PR, export an
+ * Executes the complete safe pipeline: reproduce, inspect, patch, test, commit
+ * locally, persist evidence, optionally publish a draft PR, export an
  * after-trace, and notify Slack. External delivery failures never turn a green
  * verification red; they are recorded in delivery status for retry.
  */
 export async function runHealingPipeline(
   trace: AgentTrace,
   mode: "demo" | "connected" = "demo",
+  options: RunOptions = {},
 ): Promise<HealResult> {
-  const base = healTrace(trace, mode);
-  const runId = `heal_${randomUUID().slice(0, 8)}`;
+  const deps = options.deps ?? createPipelineDeps();
+  const runId = options.runId ?? `heal_${randomUUID().slice(0, 8)}`;
+  const correlationId = options.correlationId ?? randomUUID();
   const startedAt = new Date().toISOString();
   const messages: string[] = [];
+  const events: AuditEvent[] = [];
+  let seq = 0;
 
-  if (base.diagnosis.category !== "schema-drift" || !trace.spans.some((span) => span.name === "tool.lookup_order")) {
+  const record = async (next: RunState, message: string, detail?: Record<string, unknown>) => {
+    options.onState?.(next);
+    const event: AuditEvent = {
+      seq: (seq += 1),
+      at: new Date().toISOString(),
+      state: next,
+      message,
+      attempt: 1,
+      actor: deps.patchStrategy.id,
+      correlationId,
+      detail,
+    };
+    events.push(event);
+    try {
+      await deps.runStore.appendEvent(runId, event);
+    } catch {
+      // Audit persistence must never break a verified run.
+    }
+  };
+
+  const base = healTrace(trace, mode);
+  await record("reproducing", "Healing request accepted; preparing isolated workspace", {
+    mode,
+    traceId: trace.id,
+  });
+
+  // The local graph inspects the target repository. Until an explicit repository
+  // provider is configured this is the immutable target fixture checkout.
+  const repositoryRoot = process.env.TRACEHEALER_TARGET_REPO_DIR ?? path.join(process.cwd(), "fixtures", "target-agent");
+  const context = await deps.contextProvider.build(repositoryRoot, base.diagnosis.symbol);
+
+  const proposalInput = { trace, diagnosis: base.diagnosis, context };
+  const strategy = deps.patchStrategy;
+  const strategySupports = strategy.supports(proposalInput);
+
+  if (!strategySupports) {
+    await record("needs-review", "No registered patch strategy supports this failure", {
+      category: base.diagnosis.category,
+    });
     const unsupported: HealResult = {
       ...base,
       id: runId,
       status: "needs-review",
+      state: "needs-review",
+      correlationId,
+      idempotencyKey: options.idempotencyKey,
       verification: {
         ...base.verification,
         passed: false,
@@ -65,25 +114,116 @@ export async function runHealingPipeline(
       },
       proposal: { ...base.proposal, number: 0, state: "local", url: null },
       delivery: {
-        github: integrationStatus().github.configured ? "ready" : "not-configured",
-        neatlogs: integrationStatus().neatlogs.configured ? "failed" : "not-configured",
-        slack: integrationStatus().slack.configured ? "failed" : "not-configured",
+        github: deps.pullRequest.configured() ? "ready" : "not-configured",
+        neatlogs: "not-configured",
+        slack: "not-configured",
         messages: ["No trusted sandbox strategy is registered for this failure category."],
       },
+      events,
       startedAt,
       completedAt: new Date().toISOString(),
     };
-    await saveHealingRun(unsupported);
+    await persistResult(deps, unsupported, "needs-review");
     return unsupported;
   }
 
-  const sandbox = await executeDemoSandbox(trace, { workspaceId: runId });
-  const context = await buildLocalContextGraph(sandbox.workspacePath, base.diagnosis.symbol);
+  let proposal;
+  try {
+    await record("diagnosing", "Root cause isolated", {
+      file: base.diagnosis.file,
+      line: base.diagnosis.line,
+      confidence: base.diagnosis.confidence,
+    });
+    proposal = await strategy.propose(proposalInput);
+  } catch (error) {
+    const failure = asTraceHealerError(error, "Patch strategy failed to produce a proposal");
+    await record("needs-review", failure.publicMessage, { code: failure.code });
+    const failed: HealResult = {
+      ...base,
+      id: runId,
+      status: "needs-review",
+      state: "needs-review",
+      correlationId,
+      idempotencyKey: options.idempotencyKey,
+      verification: {
+        ...base.verification,
+        passed: false,
+        after: base.verification.before,
+        improvements: { latencyPercent: 0, tokenPercent: 0, costPercent: 0 },
+      },
+      proposal: { ...base.proposal, number: 0, state: "local", url: null },
+      delivery: {
+        github: deps.pullRequest.configured() ? "ready" : "not-configured",
+        neatlogs: "not-configured",
+        slack: "not-configured",
+        messages: [failure.publicMessage],
+      },
+      events,
+      startedAt,
+      completedAt: new Date().toISOString(),
+    };
+    await persistResult(deps, failed, "needs-review");
+    return failed;
+  }
+
+  await record("patching", "Minimal patch proposed and validated against policy", { file: proposal.file });
+
+  let sandbox;
+  try {
+    await record("verifying", "Reproducing failure and running verification in isolation", {
+      file: proposal.file,
+    });
+    sandbox = await deps.sandbox.run({ trace, workspaceId: runId, proposal });
+  } catch (error) {
+    const failure = asTraceHealerError(error, "Sandbox execution failed");
+    const terminal: RunState = "needs-review";
+    await record(terminal, failure.publicMessage, { code: failure.code });
+    const blocked: HealResult = {
+      ...base,
+      id: runId,
+      status: "needs-review",
+      state: terminal,
+      correlationId,
+      idempotencyKey: options.idempotencyKey,
+      verification: {
+        ...base.verification,
+        passed: false,
+        after: base.verification.before,
+        improvements: { latencyPercent: 0, tokenPercent: 0, costPercent: 0 },
+      },
+      proposal: { ...base.proposal, number: 0, state: "local", url: null },
+      delivery: {
+        github: deps.pullRequest.configured() ? "ready" : "not-configured",
+        neatlogs: "not-configured",
+        slack: "not-configured",
+        messages: [failure.publicMessage],
+      },
+      events,
+      startedAt,
+      completedAt: new Date().toISOString(),
+    };
+    await persistResult(deps, blocked, "needs-review");
+    return blocked;
+  }
+
+  const passed = sandbox.verification.passed;
+  await record(passed ? "committing" : "needs-review", passed ? "Verification passed; committing locally" : "Verification failed; nothing will be committed or published", {
+    beforeExit: sandbox.beforeTest.exitCode,
+    afterExit: sandbox.afterTest.exitCode,
+  });
+
+  const dataRoot = process.env.TRACEHEALER_DATA_DIR ?? "";
+  const policy = loadPolicy();
+  const appliedStrategy = policy.allowModelPatches ? strategy.id : "deterministic-order-schema-drift";
+
   let result: HealResult = {
     ...base,
     id: runId,
-    status: sandbox.verification.passed ? "healed" : "needs-review",
-    patch: sandbox.patch,
+    status: passed ? "healed" : "needs-review",
+    state: passed ? "committing" : "needs-review",
+    correlationId,
+    idempotencyKey: options.idempotencyKey,
+    patch: { ...sandbox.patch, file: proposal.file },
     verification: sandbox.verification,
     steps: [
       {
@@ -103,14 +243,14 @@ export async function runHealingPipeline(
       {
         id: "patch",
         label: "Minimal patch applied",
-        detail: `+${sandbox.patch.additions} −${sandbox.patch.deletions} in one file`,
+        detail: `+${sandbox.patch.additions} −${sandbox.patch.deletions} in one file · ${appliedStrategy}`,
         durationMs: 12,
         status: "complete",
       },
       {
         id: "verify",
-        label: "Sandbox verification passed",
-        detail: `${sandbox.verification.checks.length}/${sandbox.verification.checks.length} checks · node --test`,
+        label: passed ? "Sandbox verification passed" : "Sandbox verification failed",
+        detail: `${sandbox.verification.checks.filter((check) => check.status === "passed").length}/${sandbox.verification.checks.length} checks · node --test`,
         durationMs: sandbox.afterTest.durationMs,
         status: "complete",
       },
@@ -125,15 +265,16 @@ export async function runHealingPipeline(
     context,
     artifacts: {
       workspaceId: sandbox.workspaceId,
-      patchFile: relativeArtifact(sandbox.patchFile),
-      reportFile: relativeArtifact(sandbox.reportFile),
+      patchFile: "artifacts/" + sandbox.workspaceId + "/change.patch",
+      reportFile: "artifacts/" + sandbox.workspaceId + "/verification.json",
+      appliedFile: sandbox.appliedFile,
       localCommit: sandbox.localCommit,
       beforeReproduced: sandbox.beforeReproduced,
       testCommand: "node --test",
       beforeTestExitCode: sandbox.beforeTest.exitCode,
       afterTestExitCode: sandbox.afterTest.exitCode,
-      beforeLog: `${sandbox.beforeTest.stdout}${sandbox.beforeTest.stderr}`.trim().slice(-8_000),
-      afterLog: `${sandbox.afterTest.stdout}${sandbox.afterTest.stderr}`.trim().slice(-8_000),
+      beforeLog: redactLog(`${sandbox.beforeTest.stdout}${sandbox.beforeTest.stderr}`.trim().slice(-8_000), [dataRoot, sandbox.workspacePath]),
+      afterLog: redactLog(`${sandbox.afterTest.stdout}${sandbox.afterTest.stderr}`.trim().slice(-8_000), [dataRoot, sandbox.workspacePath]),
     },
     proposal: {
       ...base.proposal,
@@ -143,21 +284,23 @@ export async function runHealingPipeline(
       branch: `fix/tracehealer-${runId.slice(-8)}`,
     },
     delivery: {
-      github: integrationStatus().github.configured ? "ready" : "not-configured",
+      github: deps.pullRequest.configured() ? "ready" : "not-configured",
       neatlogs: "not-configured",
       slack: "not-configured",
       messages,
     },
+    events,
     startedAt,
     completedAt: new Date().toISOString(),
   };
 
-  const integrations = integrationStatus();
-  if (result.status === "healed" && integrations.github.configured && integrations.github.autoPublish) {
+  const autoPublish = process.env.AUTO_PUBLISH_DRAFT === "true";
+  if (passed && deps.pullRequest.configured() && autoPublish) {
+    await record("publishing", "Publishing verified draft pull request");
     try {
-      const pullRequest = await publishDraftPullRequest({
-        path: "src/order-support.mjs",
-        content: HEALED_ORDER_SOURCE,
+      const pullRequest = await deps.pullRequest.publish({
+        path: proposal.file,
+        content: proposal.content,
         branch: result.proposal.branch,
         title: result.proposal.title,
         body: pullRequestBody(result),
@@ -168,18 +311,23 @@ export async function runHealingPipeline(
         proposal: { ...result.proposal, ...pullRequest, state: "draft" },
         delivery: { ...result.delivery!, github: "published" },
       };
+      await record("healed", "Draft pull request published for human review");
     } catch (error) {
-      messages.push(error instanceof Error ? error.message : "GitHub publication failed");
-      result = { ...result, delivery: { ...result.delivery!, github: "failed", messages } };
+      messages.push(asTraceHealerError(error, "GitHub publication failed").publicMessage);
+      result = { ...result, state: "delivery-failed", delivery: { ...result.delivery!, github: "failed", messages } };
+      await record("delivery-failed", "Draft publication failed; verification result is preserved");
     }
+  } else if (passed) {
+    await record("healed", "Verified repair committed locally and ready for review");
+    result = { ...result, state: "healed" };
   }
 
   const [neatlogsDelivery, slackDelivery] = await Promise.all([
-    exportHealedTrace(trace, result),
-    notifySlack(result),
+    deps.notifications.exportTrace(trace, result),
+    deps.notifications.notify(result),
   ]);
-  if ("message" in neatlogsDelivery && neatlogsDelivery.message) messages.push(neatlogsDelivery.message);
-  if ("message" in slackDelivery && slackDelivery.message) messages.push(slackDelivery.message);
+  if (neatlogsDelivery.message) messages.push(neatlogsDelivery.message);
+  if (slackDelivery.message) messages.push(slackDelivery.message);
   result = {
     ...result,
     delivery: {
@@ -188,9 +336,33 @@ export async function runHealingPipeline(
       slack: slackDelivery.status,
       messages,
     },
+    events,
     completedAt: new Date().toISOString(),
   };
 
-  await saveHealingRun(result);
+  await persistResult(deps, result, result.state ?? "healed");
   return result;
 }
+
+async function persistResult(deps: PipelineDeps, result: HealResult, state: RunState) {
+  await deps.runStore.saveRun(result);
+  await deps.runStore.updateState(result.id, state, result.completedAt);
+  await deps.runStore.saveSummary({
+    id: result.id,
+    state,
+    status: result.status,
+    mode: result.mode,
+    traceId: result.traceId,
+    startedAt: result.startedAt,
+    completedAt: result.completedAt,
+    hasResult: true,
+    idempotencyKey: result.idempotencyKey,
+  });
+}
+
+/** Exposed for tests and callers that need to validate a repository reference. */
+export function repositoryMatchesAllowlist(repository: string, allowed: string[] = loadPolicy().allowedRepositories): boolean {
+  return allowed.some((entry) => entry === repository || matchPathGlob(entry, repository));
+}
+
+export { TraceHealerError };
