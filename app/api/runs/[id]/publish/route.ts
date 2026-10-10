@@ -1,11 +1,12 @@
 import { NextResponse } from "next/server";
+import { assertSameOrigin, enforceRateLimit, jsonError, noStore } from "@/lib/http";
 import { publishDraftPullRequest } from "@/lib/github";
-import { HEALED_ORDER_SOURCE } from "@/lib/sandbox";
-import { getHealingRun, saveHealingRun } from "@/lib/store";
+import { getHealingRun, readArtifactRelative, saveHealingRun } from "@/lib/store";
+import type { HealResult } from "@/lib/types";
 
 export const runtime = "nodejs";
 
-function bodyForRun(run: NonNullable<Awaited<ReturnType<typeof getHealingRun>>>) {
+function bodyForRun(run: HealResult) {
   return `## TraceHealer verified repair
 
 ${run.diagnosis.rootCause}
@@ -28,40 +29,57 @@ Local sandbox commit: \`${run.artifacts?.localCommit ?? "unavailable"}\`
 `;
 }
 
-export async function POST(_request: Request, context: { params: Promise<{ id: string }> }) {
-  const { id } = await context.params;
-  const run = await getHealingRun(id);
-  if (!run) return NextResponse.json({ ok: false, error: "Healing run not found" }, { status: 404 });
-  if (run.status !== "healed" || !run.verification.passed || !run.artifacts?.beforeReproduced) {
-    return NextResponse.json({ ok: false, error: "Only reproduced and fully verified repairs can be published" }, { status: 409 });
-  }
-  if (run.proposal.url) return NextResponse.json({ ok: true, run, alreadyPublished: true });
-
+export async function POST(request: Request, context: { params: Promise<{ id: string }> }) {
   try {
+    assertSameOrigin(request);
+    enforceRateLimit(`publish:${(await context.params).id}`, 10, 60_000);
+    const { id } = await context.params;
+    const run = await getHealingRun(id);
+    if (!run) {
+      return NextResponse.json({ ok: false, code: "not-found", error: "Healing run not found" }, { status: 404 });
+    }
+    if (run.status !== "healed" || !run.verification.passed || !run.artifacts?.beforeReproduced) {
+      return NextResponse.json(
+        {
+          ok: false,
+          code: "policy-rejected",
+          error: "Only reproduced and fully verified repairs can be published",
+        },
+        { status: 409 },
+      );
+    }
+    if (run.proposal.url) return NextResponse.json({ ok: true, run, alreadyPublished: true }, { headers: noStore() });
+
+    const content = run.artifacts.appliedFile ? await readArtifactRelative(run.artifacts.appliedFile) : null;
+    if (!content) {
+      return NextResponse.json(
+        { ok: false, code: "not-found", error: "The applied patch artifact is unavailable" },
+        { status: 409 },
+      );
+    }
+
     const pullRequest = await publishDraftPullRequest({
-      path: "src/order-support.mjs",
-      content: HEALED_ORDER_SOURCE,
+      path: run.patch.file,
+      content,
       branch: run.proposal.branch,
       title: run.proposal.title,
       body: bodyForRun(run),
       commitMessage: run.proposal.title,
     });
-    const updated = {
+    const updated: HealResult = {
       ...run,
-      proposal: { ...run.proposal, ...pullRequest, state: "draft" as const },
+      state: "healed",
+      proposal: { ...run.proposal, ...pullRequest, state: "draft" },
       delivery: {
-        github: "published" as const,
-        neatlogs: run.delivery?.neatlogs ?? ("not-configured" as const),
-        slack: run.delivery?.slack ?? ("not-configured" as const),
+        github: "published",
+        neatlogs: run.delivery?.neatlogs ?? "not-configured",
+        slack: run.delivery?.slack ?? "not-configured",
         messages: run.delivery?.messages ?? [],
       },
     };
     await saveHealingRun(updated);
-    return NextResponse.json({ ok: true, run: updated });
+    return NextResponse.json({ ok: true, run: updated }, { headers: noStore() });
   } catch (error) {
-    return NextResponse.json(
-      { ok: false, error: error instanceof Error ? error.message : "Draft PR publication failed" },
-      { status: 502 },
-    );
+    return jsonError(error, noStore());
   }
 }
