@@ -48,7 +48,7 @@ export function assertSameOrigin(request: Request): void {
     }
   }
   if (!allowed.has(originHost)) {
-    throw new TraceHealerError("policy-rejected", "Cross-origin request rejected");
+    throw new TraceHealerError("policy-rejected", "Cross-origin request rejected", { status: 403 });
   }
 }
 
