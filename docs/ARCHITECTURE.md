@@ -29,16 +29,40 @@ External delivery failure is retryable and does not rewrite a valid verification
 ```text
 app/api/*
   │
+  ├─ http.ts               origin/size/rate/origin guards, safe errors
+  ├─ webhook.ts            constant-time HMAC, freshness, replay guard
   ├─ trace-normalizer.ts ── schema.ts
   │
-  └─ pipeline.ts
+  └─ runs.ts               async coordinator: idempotency, cancel, timeout
+       │                     │
+       │                     └─ run-state.ts   guarded lifecycle transitions
+       ▼
+     pipeline.ts  ◀── providers.ts (interfaces + DI registry)
        ├─ engine.ts          diagnosis and policy
+       ├─ strategies.ts      deterministic + policy-gated model strategies
+       ├─ policy.ts          allowlists, protected paths, safe paths
        ├─ context.ts         repository graph
        ├─ sandbox.ts         workspace, commands, git, artifacts
-       ├─ store.ts           atomic run persistence
+       ├─ store.ts           serialized atomic persistence + audit events
+       ├─ redact.ts          secret/PII/path redaction
+       ├─ metrics.ts         derived service metrics
        ├─ github.ts          draft-only publication
        └─ integrations.ts    after-trace and Slack delivery
 ```
+
+## Run lifecycle
+
+```text
+queued → reproducing → diagnosing → patching → verifying → committing
+  → publishing → healed
+
+terminals: healed · needs-review · cancelled · timed-out
+delivery-failed (settled, retryable without re-verifying)
+```
+
+Every transition is validated by `lib/run-state.ts`, emitted as an append-only
+audit event with a correlation id, and reflected in the persisted run summary
+that the UI polls.
 
 ## Core model
 
@@ -117,18 +141,24 @@ The local process provider is suitable for the fixed trusted fixture. Arbitrary 
 
 ## Security properties
 
-- Raw-body timing-safe HMAC verification
+- Raw-body timing-safe HMAC verification with timestamp tolerance and replay detection
+- Same-origin guard (403), JSON content-type guard (400), request-size limit, rate limit (429)
 - Runtime payload validation
-- Fixed command/path strategy for the built-in flow
-- 20-second command timeout and 1 MiB output limit
+- Administrator policy: repository/path/command allowlists and protected paths
+- Fixed command/path strategy for the built-in flow; malformed config fails safely
+- Command timeout, output limit, and diff-size limit
 - Failure must reproduce before mutation
 - Complete regression pass required before commit/publication
-- Artifact path reconstruction and run-ID validation
-- Secret-safe integration status
+- Safe artifact resolution (traversal and absolute paths rejected)
+- Secret/PII/path redaction for logs, artifacts, and model context
+- Secret-safe integration status (booleans only)
 - Draft-only publication; no merge endpoint
-- Security response headers and unprivileged Docker runtime
+- Strict Content-Security-Policy and hardening headers
 
-Production still needs authenticated ingress, trace PII redaction, a hardened untrusted-code runner, rate limits, and tenant isolation.
+Production still needs authenticated ingress, multi-tenant authorization, a
+hardened untrusted-code container runner, and durable queue/storage adapters.
+Those boundaries are now explicit interfaces (`lib/providers.ts`) rather than
+leaking into domain logic.
 
 ## Deployment
 

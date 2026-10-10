@@ -43,15 +43,36 @@ The image includes Node and git, runs as an unprivileged user, exposes port 3000
 | Method | Path | Purpose |
 |---|---|---|
 | `GET` | `/api/health` | Liveness and capability report |
-| `POST` | `/api/heal` | Run the full pipeline; native trace optional |
+| `GET` | `/api/ready` | Readiness: config parses, data root writable |
+| `GET` | `/api/metrics` | Service metrics derived from persisted runs |
+| `POST` | `/api/heal` | Run the full pipeline synchronously; native trace optional; supports `idempotencyKey` |
+| `POST` | `/api/runs` | Create a run asynchronously (202); supports `idempotencyKey` |
+| `GET` | `/api/runs` | Persisted healing-run summaries |
+| `GET` | `/api/runs/:id` | One complete healing record with audit events |
+| `GET` | `/api/runs/:id/progress` | Server-owned state, events, and result for polling |
+| `POST` | `/api/runs/:id/cancel` | Cancel an in-flight run |
+| `POST` | `/api/runs/:id/publish` | Publish an already-verified draft PR |
 | `POST` | `/api/webhooks/neatlogs` | Signed failed-trace intake; accepts native or OTLP JSON |
 | `GET` | `/api/incidents` | Current incident list |
-| `GET` | `/api/runs` | Persisted healing-run audit log |
-| `GET` | `/api/runs/:id` | One complete healing record |
-| `POST` | `/api/runs/:id/publish` | Publish an already-verified draft PR |
 | `GET` | `/api/artifacts/:id/patch` | Generated patch artifact |
 | `GET` | `/api/artifacts/:id/report` | Machine-readable verification report |
 | `GET` | `/api/integrations` | Secret-safe integration readiness |
+
+## Administrator policy
+
+`lib/policy.ts` reads these optional variables (safe defaults in `.env.example`):
+
+- `TRACEHEALER_ALLOWED_REPOSITORIES` / `TRACEHEALER_ALLOWED_PATHS`
+- `TRACEHEALER_ALLOWED_BINARIES`
+- `TRACEHEALER_PROTECTED_PATHS`
+- `TRACEHEALER_ALLOW_TEST_EDITS` / `TRACEHEALER_ALLOW_MODEL_PATCHES`
+- `TRACEHEALER_COMMAND_TIMEOUT_MS`, `TRACEHEALER_MAX_OUTPUT_BYTES`,
+  `TRACEHEALER_MAX_DIFF_BYTES`, `TRACEHEALER_MAX_REQUEST_BYTES`,
+  `TRACEHEALER_RATE_LIMIT`, `TRACEHEALER_RUN_TIMEOUT_MS`,
+  `TRACEHEALER_WEBHOOK_TOLERANCE_MS`, `TRACEHEALER_WEBHOOK_REQUIRE_TIMESTAMP`
+
+A malformed numeric value makes `/api/ready` fail safely rather than starting
+with a partial configuration.
 
 ## Webhook signing
 
@@ -59,9 +80,12 @@ When `NEATLOGS_WEBHOOK_SECRET` is configured, TraceHealer requires:
 
 ```text
 x-neatlogs-signature: sha256=<hex HMAC-SHA256 of the unmodified body>
+x-neatlogs-timestamp: <epoch milliseconds>   # optional unless required
 ```
 
-Invalid signatures return `401` before parsing.
+Invalid signatures return `401` before parsing. A timestamp outside
+`TRACEHEALER_WEBHOOK_TOLERANCE_MS` is rejected, and a repeated signed delivery is
+treated as an idempotent duplicate so provider retries are safe.
 
 ## Persistence
 
