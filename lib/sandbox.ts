@@ -83,6 +83,31 @@ const DEFAULT_PROPOSAL: PatchProposal = {
   language: "javascript",
 };
 
+/**
+ * Environment variables a target-repository subprocess legitimately needs.
+ * Everything else is withheld so a build/test/replay script cannot read
+ * platform credentials (tokens, keys, webhook URLs) from the server process.
+ */
+const ALLOWED_CHILD_ENV_KEYS = [
+  "PATH", "Path", "PATHEXT", "SystemRoot", "SystemDrive", "windir", "COMSPEC", "ComSpec",
+  "TEMP", "TMP", "TMPDIR", "HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA",
+  "ProgramFiles", "ProgramData", "LANG", "LC_ALL", "NUMBER_OF_PROCESSORS", "OS", "SHELL", "PWD", "TZ",
+] as const;
+
+const SECRET_NAME = /token|secret|passwd|password|credential|api[_-]?key|webhook|auth|database_url|private/i;
+
+/** Build the minimal child environment used for every sandboxed command. */
+export function sandboxEnvironment(base: NodeJS.ProcessEnv = process.env): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const key of ALLOWED_CHILD_ENV_KEYS) {
+    const value = base[key];
+    if (value !== undefined && !SECRET_NAME.test(key)) env[key] = value;
+  }
+  env.CI = "1";
+  env.NO_COLOR = "1";
+  return env;
+}
+
 async function run(command: string, args: string[], cwd: string): Promise<CommandResult> {
   const policy = loadPolicy();
   assertAllowedCommand(command, policy);
@@ -92,11 +117,9 @@ async function run(command: string, args: string[], cwd: string): Promise<Comman
       cwd,
       timeout: policy.commandTimeoutMs,
       maxBuffer: policy.maxOutputBytes,
-      env: {
-        ...process.env,
-        CI: "1",
-        NO_COLOR: "1",
-      },
+      // Deliberately a minimal subset of the server environment, not 
+      // process.env: target-repository code must never receive credentials.
+      env: sandboxEnvironment() as NodeJS.ProcessEnv,
     });
     return {
       exitCode: 0,

@@ -28,6 +28,7 @@ remains unverified or externally blocked. Statuses are truthful: a capability is
 | Security hardening | same-origin (403), content-type (400), size limits, rate limit (429), CSP + headers | `lib/http.test.ts`, HTTP smoke | Limits are per-process, in-memory | verified |
 | Webhook auth | constant-time HMAC, timestamp tolerance, replay guard | `lib/webhook.test.ts`, HTTP smoke (202/400) | Live neatlogs contract unverified | verified (contract) |
 | Secret/PII redaction | `lib/redact.ts` applied to logs and model context | `lib/redact.test.ts`, smoke (`absolutePathInLog: false`) | Pattern-based, not exhaustive | verified |
+| Sandbox env isolation | `sandboxEnvironment()` forwards only operational variables to child processes | `lib/sandbox.test.ts` | Still no OS-level container boundary | verified |
 | Model patch strategy | `createModelStrategy` strict JSON, policy-gated, off by default | `lib/strategies.test.ts` adversarial cases | Live model provider unverified | implemented |
 | Readiness + metrics | `/api/ready`, `/api/metrics` derived from persisted runs | HTTP smoke | None found | verified |
 | Repository context (local graph) | `lib/context.ts` scans the target fixture for files/symbols/tests | pipeline test | Only JS/TS-shaped files | verified |
@@ -56,6 +57,16 @@ remains unverified or externally blocked. Statuses are truthful: a capability is
 - **Windows persistence race.** Concurrent atomic writes to the same summary
   file raised `EPERM` on rename. Fixed with per-path write serialization and
   rename retry (`lib/store.ts`).
+
+## Post-merge audit fix
+
+- **Secret exposure in the sandbox child process.** `lib/sandbox.ts` forwarded
+the entire server environment (`...process.env`) to the build/test/replay
+subprocess. Any repository code executing in that process could read
+`GITHUB_TOKEN`, `NEATLOGS_API_KEY`, `SLACK_WEBHOOK_URL`, or `OPENAI_API_KEY`.
+Fixed by building an explicit operational allowlist (`sandboxEnvironment()`),
+with a regression test asserting credentials are withheld while `PATH`/`HOME`
+are preserved.
 
 ## Externally blocked items (exact requirements)
 

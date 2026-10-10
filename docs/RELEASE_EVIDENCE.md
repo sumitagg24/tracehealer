@@ -121,6 +121,28 @@ runtime, healthcheck, and restart/persistence were not executed here.
 - No container worker for untrusted repositories; the sandbox runs the fixed
   trusted fixture in-process.
 
+## Post-merge audit (2026-10-10)
+
+An independent audit ran against a fresh clone of `origin/main` (commit
+`91cc978`). It reproduced the results above and found one hardening gap, now
+fixed:
+
+- **Sandbox child environment.** `lib/sandbox.ts` previously passed
+  `...process.env` to the subprocess that runs target-repository tests and the
+  replay worker, exposing platform credentials to that code. It now builds an
+  explicit allowlist via `sandboxEnvironment()`. Regression test:
+  `lib/sandbox.test.ts` asserts `GITHUB_TOKEN`, `NEATLOGS_API_KEY`,
+  `SLACK_WEBHOOK_URL`, `OPENAI_API_KEY`, and `DATABASE_URL` are absent while
+  `PATH`/`HOME` remain. The real sandbox tests still pass, proving the narrowed
+  environment is sufficient for `git` and `node`.
+
+Audit notes (not defects): the sandbox runs the trusted fixture in-process, so
+there is still no OS-level isolation for untrusted repositories; `npm start`
+prints a standalone warning (use `node .next/standalone/server.js`); and the
+readiness route is `/api/ready` (not `/api/readiness`). Dev-only `npm audit`
+highs are the `eslint-config-next` → `@next/eslint-plugin-next` → `fast-glob` →
+`micromatch` → `braces` chain with no production impact.
+
 ## Dependency audit
 
 `npm audit --omit=dev` reports `found 0 vulnerabilities`. The full `npm audit`
