@@ -8,8 +8,8 @@ describe("TraceHealer engine", () => {
     const diagnosis = diagnoseTrace(DEMO_TRACE);
 
     expect(diagnosis.category).toBe("schema-drift");
-    expect(diagnosis.file).toBe("src/agents/order-support.ts");
-    expect(diagnosis.line).toBe(47);
+    expect(diagnosis.file).toBe("src/order-support.mjs");
+    expect(diagnosis.line).toBe(9);
     expect(diagnosis.symbol).toBe("getCustomerEmail");
     expect(diagnosis.confidence).toBeGreaterThan(0.9);
   });

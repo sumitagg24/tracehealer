@@ -1,6 +1,6 @@
 {
   "name": "tracehealer",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "An autonomous incident response agent that turns failed AI traces into verified code patches.",
   "scripts": {
@@ -10,7 +10,8 @@
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "check": "npm run typecheck && npm run lint && npm test && npm run build"
   },
   "dependencies": {
     "lucide-react": "^1.55.0",

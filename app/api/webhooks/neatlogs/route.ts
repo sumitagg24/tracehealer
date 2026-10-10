@@ -1,8 +1,8 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { NextResponse } from "next/server";
 import { ZodError } from "zod";
-import { healTrace } from "@/lib/engine";
-import { agentTraceSchema } from "@/lib/schema";
+import { runHealingPipeline } from "@/lib/pipeline";
+import { normalizeTracePayload } from "@/lib/trace-normalizer";
 
 export const runtime = "nodejs";
 
@@ -28,8 +28,8 @@ export async function POST(request: Request) {
       return NextResponse.json({ ok: true, ignored: true, reason: `Event ${event.type} is not actionable` });
     }
 
-    const trace = agentTraceSchema.parse(event.trace ?? event);
-    const result = healTrace(trace, "connected");
+    const trace = normalizeTracePayload(event.trace ?? event);
+    const result = await runHealingPipeline(trace, "connected");
 
     return NextResponse.json({ ok: true, accepted: true, healingRun: result });
   } catch (error) {

@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { ZodError } from "zod";
 import { DEMO_TRACE } from "@/lib/demo-data";
-import { healTrace } from "@/lib/engine";
+import { runHealingPipeline } from "@/lib/pipeline";
 import { healRequestSchema } from "@/lib/schema";
 
 export const runtime = "nodejs";
@@ -10,7 +10,7 @@ export async function POST(request: Request) {
   try {
     const raw = await request.json().catch(() => ({}));
     const body = healRequestSchema.parse(raw);
-    const result = healTrace(body.trace ?? DEMO_TRACE, body.mode);
+    const result = await runHealingPipeline(body.trace ?? DEMO_TRACE, body.mode);
 
     return NextResponse.json({ ok: true, result });
   } catch (error) {

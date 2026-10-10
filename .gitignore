@@ -13,6 +13,7 @@ dist/
 .env
 .env.local
 .env.*.local
+.tracehealer-data/
 
 # tests
 coverage/

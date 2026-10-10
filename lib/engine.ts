@@ -10,7 +10,7 @@ import type {
   VerificationResult,
 } from "@/lib/types";
 
-const STACK_LOCATION = /(?:at\s+[^\s]+\s+\()?([^\s()]+\.(?:ts|tsx|js|jsx|py)):(\d+):(\d+)\)?/;
+const STACK_LOCATION = /(?:at\s+[^\s]+\s+\()?([^\s()]+\.(?:ts|tsx|js|jsx|mjs|cjs|py)):(\d+):(\d+)\)?/;
 
 function failedSpan(trace: AgentTrace): TraceSpan {
   const failures = trace.spans.filter((span) => span.status === "error");
@@ -95,7 +95,11 @@ function buildPatch(diagnosis: Diagnosis): CodePatch {
   if (diagnosis.category === "schema-drift") {
     return {
       file: diagnosis.file,
-      language: diagnosis.file.endsWith(".py") ? "python" : "typescript",
+      language: diagnosis.file.endsWith(".py")
+        ? "python"
+        : diagnosis.file.endsWith(".ts") || diagnosis.file.endsWith(".tsx")
+          ? "typescript"
+          : "javascript",
       title: "Handle Order API v3 contact schema",
       rationale:
         "Keep compatibility with the previous customer.email field, add the v3 contact.primaryEmail path, and fail with a typed contract error instead of entering the retry loop.",
@@ -107,7 +111,11 @@ function buildPatch(diagnosis: Diagnosis): CodePatch {
 
   return {
     file: diagnosis.file,
-    language: diagnosis.file.endsWith(".py") ? "python" : "typescript",
+    language: diagnosis.file.endsWith(".py")
+      ? "python"
+      : diagnosis.file.endsWith(".ts") || diagnosis.file.endsWith(".tsx")
+        ? "typescript"
+        : "javascript",
     title: `Add a bounded ${diagnosis.category} recovery path`,
     rationale: "Turn the observed production failure into an explicit, testable application contract.",
     diff: `@@ -${diagnosis.line},1 +${diagnosis.line},5 @@\n-  return await execute(input);\n+  try {\n+    return await execute(input);\n+  } catch (error) {\n+    throw new AgentContractError(\"Bounded recovery failed\", { cause: error });\n+  }`,
