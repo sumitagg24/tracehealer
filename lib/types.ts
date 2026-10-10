@@ -1,5 +1,48 @@
 export type SpanStatus = "ok" | "error" | "running";
 
+/**
+ * Explicit, persisted lifecycle for a healing run. The UI renders these states
+ * directly so progress comes from the server rather than client timers.
+ */
+export type RunState =
+  | "queued"
+  | "reproducing"
+  | "diagnosing"
+  | "patching"
+  | "verifying"
+  | "committing"
+  | "publishing"
+  | "healed"
+  | "needs-review"
+  | "delivery-failed"
+  | "cancelled"
+  | "timed-out";
+
+/** Append-only audit trail entry. Detail must stay safe for client display. */
+export interface AuditEvent {
+  seq: number;
+  at: string;
+  state: RunState;
+  message: string;
+  attempt: number;
+  actor: string;
+  correlationId: string;
+  detail?: Record<string, unknown>;
+}
+
+/** Lightweight, secret-free projection used for polling and the run list. */
+export interface RunSummary {
+  id: string;
+  state: RunState;
+  status: "healed" | "needs-review";
+  mode: "demo" | "connected";
+  traceId: string;
+  startedAt: string;
+  completedAt: string | null;
+  hasResult: boolean;
+  idempotencyKey?: string;
+}
+
 export interface TraceSpan {
   id: string;
   parentId?: string;
@@ -120,6 +163,8 @@ export interface HealResult {
     workspaceId: string;
     patchFile: string;
     reportFile: string;
+    /** Data-root-relative path to the applied source used for publication. */
+    appliedFile?: string;
     localCommit: string | null;
     beforeReproduced: boolean;
     testCommand: string;
@@ -134,6 +179,10 @@ export interface HealResult {
     slack: "not-configured" | "sent" | "failed";
     messages: string[];
   };
+  state?: RunState;
+  events?: AuditEvent[];
+  correlationId?: string;
+  idempotencyKey?: string;
   startedAt: string;
   completedAt: string;
 }
