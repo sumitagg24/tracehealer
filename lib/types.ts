@@ -109,6 +109,31 @@ export interface HealResult {
     url: string | null;
     state: "draft" | "local";
   };
+  context?: {
+    provider: "local-graph" | "entire";
+    filesInspected: string[];
+    relatedTests: string[];
+    symbols: string[];
+    checkpointId: string | null;
+  };
+  artifacts?: {
+    workspaceId: string;
+    patchFile: string;
+    reportFile: string;
+    localCommit: string | null;
+    beforeReproduced: boolean;
+    testCommand: string;
+    beforeTestExitCode: number;
+    afterTestExitCode: number;
+    beforeLog: string;
+    afterLog: string;
+  };
+  delivery?: {
+    github: "not-configured" | "ready" | "published" | "failed";
+    neatlogs: "not-configured" | "exported" | "failed";
+    slack: "not-configured" | "sent" | "failed";
+    messages: string[];
+  };
   startedAt: string;
   completedAt: string;
 }

@@ -40,6 +40,16 @@ import type { HealResult, TraceSpan } from "@/lib/types";
 
 type Tab = "trace" | "diagnosis" | "patch";
 type RunState = "idle" | "running" | "complete" | "error";
+type Page = "incident" | "overview" | "incidents" | "runs" | "evaluations" | "repositories" | "integrations";
+
+type IntegrationSnapshot = {
+  github: { configured: boolean; autoPublish: boolean };
+  neatlogs: { configured: boolean; signedWebhooks: boolean };
+  slack: { configured: boolean };
+  openai: { configured: boolean; model: string };
+  entire: { configured: boolean };
+  sandbox: { configured: boolean; provider: string };
+};
 
 const workflow = [
   { id: "capture", label: "Read failure trace", detail: "Import spans, inputs, and runtime context" },
@@ -75,26 +85,41 @@ function formatDuration(ms: number) {
   return ms >= 1000 ? `${(ms / 1000).toFixed(ms % 1000 === 0 ? 0 : 2)}s` : `${ms}ms`;
 }
 
-function Sidebar({ open, onClose }: { open: boolean; onClose: () => void }) {
-  const nav = [
-    { icon: LayoutDashboard, label: "Overview" },
-    { icon: AlertTriangle, label: "Incidents", count: 1, active: true },
-    { icon: HeartPulse, label: "Healing runs" },
-    { icon: ListChecks, label: "Evaluations" },
+function Sidebar({
+  open,
+  activePage,
+  onClose,
+  onNavigate,
+}: {
+  open: boolean;
+  activePage: Page;
+  onClose: () => void;
+  onNavigate: (page: Page) => void;
+}) {
+  const nav: Array<{ icon: typeof LayoutDashboard; label: string; page: Page; count?: number }> = [
+    { icon: LayoutDashboard, label: "Overview", page: "overview" },
+    { icon: AlertTriangle, label: "Incidents", page: "incidents", count: 1 },
+    { icon: HeartPulse, label: "Healing runs", page: "runs" },
+    { icon: ListChecks, label: "Evaluations", page: "evaluations" },
   ];
+
+  const navigate = (page: Page) => {
+    onNavigate(page);
+    onClose();
+  };
 
   return (
     <>
       {open && <button className="sidebar-scrim" onClick={onClose} aria-label="Close navigation" />}
       <aside className={`sidebar ${open ? "sidebar-open" : ""}`}>
-        <div className="sidebar-brand">
+        <button className="sidebar-brand" onClick={() => navigate("overview")}>
           <BrandMark className="brand-mark" />
           <span>tracehealer</span>
           <span className="beta-tag">BETA</span>
-          <button className="mobile-close" onClick={onClose} aria-label="Close menu">
+          <span className="mobile-close" onClick={(event) => { event.stopPropagation(); onClose(); }} aria-label="Close menu" role="button">
             <X size={18} />
-          </button>
-        </div>
+          </span>
+        </button>
 
         <button className="workspace-switcher">
           <span className="workspace-avatar">N</span>
@@ -108,18 +133,22 @@ function Sidebar({ open, onClose }: { open: boolean; onClose: () => void }) {
         <nav className="side-nav" aria-label="Primary navigation">
           <p className="nav-label">MONITOR</p>
           {nav.map((item) => (
-            <button className={`nav-item ${item.active ? "active" : ""}`} key={item.label}>
+            <button
+              className={`nav-item ${activePage === item.page || (item.page === "incidents" && activePage === "incident") ? "active" : ""}`}
+              key={item.label}
+              onClick={() => navigate(item.page)}
+            >
               <item.icon size={17} strokeWidth={1.8} />
               <span>{item.label}</span>
               {item.count ? <span className="nav-count">{item.count}</span> : null}
             </button>
           ))}
           <p className="nav-label integrations-label">BUILD</p>
-          <button className="nav-item">
+          <button className={`nav-item ${activePage === "repositories" ? "active" : ""}`} onClick={() => navigate("repositories")}>
             <GitBranch size={17} strokeWidth={1.8} />
             <span>Repositories</span>
           </button>
-          <button className="nav-item">
+          <button className={`nav-item ${activePage === "integrations" ? "active" : ""}`} onClick={() => navigate("integrations")}>
             <Settings2 size={17} strokeWidth={1.8} />
             <span>Integrations</span>
             <span className="connected-dot" />
@@ -148,16 +177,25 @@ function Sidebar({ open, onClose }: { open: boolean; onClose: () => void }) {
   );
 }
 
-function Topbar({ onMenu }: { onMenu: () => void }) {
+function Topbar({ page, onMenu }: { page: Page; onMenu: () => void }) {
+  const labels: Record<Page, string> = {
+    incident: "INC-2841",
+    overview: "Overview",
+    incidents: "Incidents",
+    runs: "Healing runs",
+    evaluations: "Evaluations",
+    repositories: "Repositories",
+    integrations: "Integrations",
+  };
   return (
     <header className="topbar">
       <button className="menu-button" onClick={onMenu} aria-label="Open navigation">
         <Menu size={20} />
       </button>
       <div className="crumbs">
-        <span>Incidents</span>
+        <span>NeatHack Lab</span>
         <span>/</span>
-        <strong>INC-2841</strong>
+        <strong>{labels[page]}</strong>
       </div>
       <div className="topbar-actions">
         <div className="command-search">
@@ -321,7 +359,10 @@ function DiagnosisView({ result }: { result: HealResult | null }) {
             <ArrowDown size={14} />
             <div><span className="plus">+</span><code>order.contact.primaryEmail</code></div>
           </div>
-          <div className="source-chip"><FileCode2 size={14} /> src/agents/order-support.ts <span>Line 47</span></div>
+          <div className="source-chip">
+            <FileCode2 size={14} /> {diagnosis?.file ?? "src/order-support.mjs"}
+            <span>Line {diagnosis?.line ?? 9}</span>
+          </div>
         </div>
       </div>
     </div>
@@ -363,7 +404,7 @@ function PatchView({ result, onHeal }: { result: HealResult | null; onHeal: () =
       </div>
       <div className="file-header">
         <span><ChevronDown size={14} /><FileCode2 size={14} /> {result.patch.file}</span>
-        <span>TypeScript</span>
+        <span>{result.patch.language}</span>
       </div>
       <div className="diff-block">
         {result.patch.diff.split("\n").map((line, index) => <DiffLine line={line} key={`${line}-${index}`} />)}
@@ -424,7 +465,13 @@ function HealingAgent({
       {state === "complete" && result ? (
         <div className="healed-summary">
           <div className="healed-check"><Check size={18} strokeWidth={3} /></div>
-          <div><strong>Verified in 4.2 seconds</strong><span>4/4 regression checks passed</span></div>
+          <div>
+            <strong>Verified in an isolated workspace</strong>
+            <span>
+              {result.verification.checks.filter((check) => check.status === "passed").length}/{result.verification.checks.length} checks passed
+              {result.artifacts?.localCommit ? ` · commit ${result.artifacts.localCommit}` : ""}
+            </span>
+          </div>
         </div>
       ) : null}
 
@@ -472,6 +519,19 @@ function ProofPanel({ result }: { result: HealResult }) {
           <div key={check.name}><CheckCircle2 size={14} /><span>{check.name}</span><small>{check.durationMs}ms</small></div>
         ))}
       </div>
+      {result.artifacts ? (
+        <div className="artifact-strip">
+          <div>
+            <SquareTerminal size={14} />
+            <span>Actual sandbox run</span>
+            <small>before exit {result.artifacts.beforeTestExitCode} → after exit {result.artifacts.afterTestExitCode}</small>
+          </div>
+          <div className="artifact-actions">
+            <a href={`/api/artifacts/${result.id}/patch`} target="_blank" rel="noreferrer"><FileCode2 size={13} /> Patch artifact</a>
+            <a href={`/api/artifacts/${result.id}/report`} target="_blank" rel="noreferrer"><ExternalLink size={13} /> Verification JSON</a>
+          </div>
+        </div>
+      ) : null}
     </section>
   );
 }
@@ -496,8 +556,205 @@ function ValueStrip() {
   );
 }
 
+function ManagementPage({
+  page,
+  latestResult,
+  onOpenIncident,
+  onRunHealer,
+}: {
+  page: Exclude<Page, "incident">;
+  latestResult: HealResult | null;
+  onOpenIncident: () => void;
+  onRunHealer: () => void;
+}) {
+  const [runs, setRuns] = useState<HealResult[]>(latestResult ? [latestResult] : []);
+  const [integrations, setIntegrations] = useState<IntegrationSnapshot | null>(null);
+
+  useEffect(() => {
+    let current = true;
+    if (page === "runs" || page === "overview") {
+      void fetch("/api/runs?limit=10")
+        .then((response) => response.json())
+        .then((payload: { runs?: HealResult[] }) => { if (current && payload.runs) setRuns(payload.runs); })
+        .catch(() => undefined);
+    }
+    if (page === "integrations" || page === "overview" || page === "repositories") {
+      void fetch("/api/integrations")
+        .then((response) => response.json())
+        .then((payload: { integrations?: IntegrationSnapshot }) => { if (current && payload.integrations) setIntegrations(payload.integrations); })
+        .catch(() => undefined);
+    }
+    return () => { current = false; };
+  }, [page, latestResult]);
+
+  const pageMeta: Record<Exclude<Page, "incident">, { eyebrow: string; title: string; description: string }> = {
+    overview: { eyebrow: "CONTROL CENTER", title: "Agent reliability at a glance", description: "Monitor failures, verified repairs, and every integration in the healing path." },
+    incidents: { eyebrow: "INCIDENT QUEUE", title: "Production incidents", description: "Prioritized failures grouped by root-cause fingerprint and customer impact." },
+    runs: { eyebrow: "AUDIT LOG", title: "Healing runs", description: "Every diagnosis, sandbox replay, patch artifact, and delivery attempt." },
+    evaluations: { eyebrow: "QUALITY GATES", title: "Verification policies", description: "Deterministic checks that every generated patch must pass before publication." },
+    repositories: { eyebrow: "SOURCE CONTROL", title: "Repositories", description: "Manage source context, base branches, test commands, and publication policy." },
+    integrations: { eyebrow: "CONNECTED SYSTEMS", title: "Integrations", description: "Trace intake, repository delivery, context providers, models, and notifications." },
+  };
+  const meta = pageMeta[page];
+
+  const heading = (
+    <div className="management-heading">
+      <div><span className="eyebrow">{meta.eyebrow}</span><h1>{meta.title}</h1><p>{meta.description}</p></div>
+      {page === "overview" || page === "incidents" ? (
+        <button className="primary-button" onClick={onRunHealer}><Sparkles size={15} /> Run full pipeline</button>
+      ) : null}
+    </div>
+  );
+
+  if (page === "overview") {
+    return (
+      <section className="management-page">
+        {heading}
+        <ValueStrip />
+        <div className="overview-grid">
+          <div className="management-card incident-spotlight">
+            <div className="card-topline"><span className="severity-pill"><span /> CRITICAL</span><small>18 minutes ago</small></div>
+            <h2>Order support agent is failing</h2>
+            <p>Order API v3 moved the customer email field. Thirty-seven runs entered the same retry loop.</p>
+            <div className="mini-trace"><i className="ok" /><i className="ok" /><i className="error" /><i className="error long" /></div>
+            <button className="text-action" onClick={onOpenIncident}>Open incident <ArrowUpRight size={14} /></button>
+          </div>
+          <div className="management-card pipeline-card">
+            <div className="card-title"><span><Activity size={15} /> Healing pipeline</span><small className="healthy-label"><span /> OPERATIONAL</small></div>
+            <div className="pipeline-map">
+              {["Trace", "Context", "Patch", "Sandbox", "Review"].map((label, index) => (
+                <div key={label}><span>{index + 1}</span><strong>{label}</strong>{index < 4 ? <i /> : null}</div>
+              ))}
+            </div>
+            <p>The local deterministic pipeline is ready. External delivery activates automatically when credentials are configured.</p>
+          </div>
+          <div className="management-card recent-runs-card">
+            <div className="card-title"><span><HeartPulse size={15} /> Recent runs</span><button className="text-action">View all</button></div>
+            {(runs.length ? runs.slice(0, 3) : latestResult ? [latestResult] : []).map((run) => (
+              <div className="compact-run" key={run.id}>
+                <span className={`run-state ${run.status}`}><Check size={11} /></span>
+                <div><strong>{run.diagnosis.summary}</strong><small>{run.id} · {run.artifacts?.localCommit ?? "analysis only"}</small></div>
+                <span>{run.verification.checks.filter((check) => check.status === "passed").length}/{run.verification.checks.length}</span>
+              </div>
+            ))}
+            {!runs.length && !latestResult ? <div className="empty-row">Run the incident pipeline to create the first audit record.</div> : null}
+          </div>
+          <div className="management-card readiness-card">
+            <div className="card-title"><span><ShieldCheck size={15} /> Delivery readiness</span></div>
+            <div className="readiness-list">
+              <div><span><SquareTerminal size={14} /> Local sandbox</span><strong className="ready">READY</strong></div>
+              <div><span><GitHubIcon size={14} /> GitHub drafts</span><strong className={integrations?.github.configured ? "ready" : "optional"}>{integrations?.github.configured ? "READY" : "CONFIGURE"}</strong></div>
+              <div><span><Radio size={14} /> neatlogs export</span><strong className={integrations?.neatlogs.configured ? "ready" : "optional"}>{integrations?.neatlogs.configured ? "READY" : "CONFIGURE"}</strong></div>
+            </div>
+          </div>
+        </div>
+      </section>
+    );
+  }
+
+  if (page === "incidents") {
+    return (
+      <section className="management-page">
+        {heading}
+        <div className="filter-row"><button className="filter-active">Open <span>1</span></button><button>Healed <span>{latestResult ? 1 : 0}</span></button><button>All</button><div><Search size={14} /> Filter incidents</div></div>
+        <div className="data-table incident-table">
+          <div className="table-head"><span>Incident</span><span>Agent</span><span>Impact</span><span>First seen</span><span>Status</span><span /></div>
+          <button className="table-row" onClick={onOpenIncident}>
+            <span><span className="table-severity" /><span><strong>Order support agent is failing</strong><small>Schema drift · customer.email</small></span></span>
+            <span><Bot size={14} /> support-agent</span><span>37 runs</span><span>18m ago</span>
+            <span><span className={`status-chip ${latestResult ? "healed" : "open"}`}>{latestResult ? "HEALED" : "OPEN"}</span></span>
+            <span><ArrowUpRight size={14} /></span>
+          </button>
+        </div>
+      </section>
+    );
+  }
+
+  if (page === "runs") {
+    return (
+      <section className="management-page">
+        {heading}
+        <div className="data-table runs-table">
+          <div className="table-head"><span>Run</span><span>Root cause</span><span>Verification</span><span>Commit</span><span>Started</span></div>
+          {runs.map((run) => (
+            <div className="table-row" key={run.id}>
+              <span><span className={`run-state ${run.status}`}><Check size={11} /></span><span><strong>{run.id}</strong><small>{run.mode}</small></span></span>
+              <span>{run.diagnosis.category}</span>
+              <span><span className="status-chip healed">{run.verification.checks.filter((check) => check.status === "passed").length}/{run.verification.checks.length} PASSED</span></span>
+              <span><code>{run.artifacts?.localCommit ?? "—"}</code></span>
+              <span>{new Date(run.startedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
+            </div>
+          ))}
+          {!runs.length ? <div className="empty-row">No persisted healing runs yet.</div> : null}
+        </div>
+      </section>
+    );
+  }
+
+  if (page === "evaluations") {
+    const checks = [
+      ["Exact-input replay", "Reproduce the observed production failure before changing source."],
+      ["Legacy contract", "Prevent the repair from breaking Order API v2 responses."],
+      ["Current contract", "Verify contact.primaryEmail from Order API v3."],
+      ["Typed failure", "Reject invalid payloads without an unbounded retry loop."],
+      ["No automatic merge", "Always stop at a reviewable draft or local proposal."],
+      ["Minimal scope", "Keep the generated change to the localized source file."],
+    ];
+    return (
+      <section className="management-page">
+        {heading}
+        <div className="policy-banner"><ShieldCheck size={20} /><div><strong>Publication gate enforced</strong><p>A patch cannot be marked healed unless failure reproduction succeeds and every after-check passes.</p></div><span>ENFORCED</span></div>
+        <div className="evaluation-grid">{checks.map(([title, text], index) => <div className="evaluation-card" key={title}><span>{index + 1}</span><CheckCircle2 size={18} /><h3>{title}</h3><p>{text}</p><small>REQUIRED</small></div>)}</div>
+      </section>
+    );
+  }
+
+  if (page === "repositories") {
+    return (
+      <section className="management-page">
+        {heading}
+        <div className="repo-card">
+          <div className="repo-icon"><GitHubIcon size={21} /></div>
+          <div><h3>northstar/support-agent</h3><p>Demo target · JavaScript · main</p></div>
+          <span className="status-chip healed">CONNECTED</span>
+          <button className="secondary-button" onClick={onOpenIncident}>Open incident</button>
+        </div>
+        <div className="repository-grid">
+          <div className="management-card"><span className="section-label">Execution policy</span><dl><div><dt>Test command</dt><dd><code>node --test</code></dd></div><div><dt>Workspace</dt><dd>Ephemeral copy</dd></div><div><dt>Timeout</dt><dd>20 seconds</dd></div><div><dt>Network</dt><dd>Disabled by strategy</dd></div></dl></div>
+          <div className="management-card"><span className="section-label">Publication policy</span><dl><div><dt>Target</dt><dd>Draft pull request</dd></div><div><dt>Auto merge</dt><dd>Never</dd></div><div><dt>Human review</dt><dd>Required</dd></div><div><dt>Automatic drafts</dt><dd>{integrations?.github.autoPublish ? "Enabled" : "Disabled"}</dd></div></dl></div>
+        </div>
+      </section>
+    );
+  }
+
+  const integrationCards = [
+    { name: "neatlogs", detail: "Failed-trace intake and verified after-trace export", configured: integrations?.neatlogs.configured, icon: Radio },
+    { name: "GitHub", detail: "Source delivery through review-only draft pull requests", configured: integrations?.github.configured, icon: GitBranch },
+    { name: "Local sandbox", detail: "Failure reproduction, test execution, and local commits", configured: true, icon: SquareTerminal },
+    { name: "Entire", detail: "Optional repository graph and checkpoint context provider", configured: integrations?.entire.configured, icon: Activity },
+    { name: "OpenAI", detail: `Optional generic patch strategy · ${integrations?.openai.model ?? "gpt-5-mini"}`, configured: integrations?.openai.configured, icon: Bot },
+    { name: "Slack", detail: "Verified-run and delivery notifications", configured: integrations?.slack.configured, icon: Bell },
+  ];
+  return (
+    <section className="management-page">
+      {heading}
+      <div className="integration-grid">
+        {integrationCards.map((integration) => (
+          <div className="integration-card" key={integration.name}>
+            <div className="integration-icon"><integration.icon size={20} /></div>
+            <div><h3>{integration.name}</h3><p>{integration.detail}</p></div>
+            <span className={`integration-state ${integration.configured ? "configured" : "available"}`}><span /> {integration.configured ? "CONFIGURED" : "OPTIONAL"}</span>
+          </div>
+        ))}
+      </div>
+      <div className="config-note"><Code2 size={16} /><div><strong>Secrets stay server-side</strong><p>Configure integrations with <code>.env.local</code>. Status endpoints expose booleans only—never tokens or webhook URLs.</p></div></div>
+    </section>
+  );
+}
+
 export function TraceHealerApp() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [activePage, setActivePage] = useState<Page>("incident");
   const [tab, setTab] = useState<Tab>("trace");
   const [selectedSpan, setSelectedSpan] = useState("sp_parse");
   const [runState, setRunState] = useState<RunState>("idle");
@@ -519,6 +776,7 @@ export function TraceHealerApp() {
   }, [runState]);
 
   async function runHealer() {
+    setActivePage("incident");
     setRunState("running");
     setRunError(null);
     setResult(null);
@@ -553,16 +811,23 @@ export function TraceHealerApp() {
   }
 
   function reviewPatch() {
+    setActivePage("incident");
     setTab("patch");
     document.getElementById("incident-workbench")?.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
   return (
     <div className="app-shell">
-      <Sidebar open={sidebarOpen} onClose={() => setSidebarOpen(false)} />
+      <Sidebar
+        open={sidebarOpen}
+        activePage={activePage}
+        onClose={() => setSidebarOpen(false)}
+        onNavigate={setActivePage}
+      />
       <div className="app-main">
-        <Topbar onMenu={() => setSidebarOpen(true)} />
+        <Topbar page={activePage} onMenu={() => setSidebarOpen(true)} />
         <main className="content">
+          {activePage === "incident" ? <>
           <section className="incident-header">
             <div className="incident-title-row">
               <div>
@@ -625,6 +890,14 @@ export function TraceHealerApp() {
                 <span><GitHubIcon size={14} /> GitHub</span>
               </div>
             </section>
+          )}
+          </> : (
+            <ManagementPage
+              page={activePage}
+              latestResult={result}
+              onOpenIncident={() => setActivePage("incident")}
+              onRunHealer={() => void runHealer()}
+            />
           )}
 
           <footer className="app-footer">

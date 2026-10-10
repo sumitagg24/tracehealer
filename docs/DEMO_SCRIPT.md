@@ -25,7 +25,7 @@ Click the successful `tool.lookup_order` span, then the red `order.normalize` sp
 
 Click **Heal incident**.
 
-> “TraceHealer imports the spans, picks the first actionable application frame—not the noisy parent error—maps it to line 47, generates the smallest compatibility patch, and replays the exact failed payload.”
+> “TraceHealer imports the spans, picks the first actionable application frame—not the noisy parent error—maps it to the exact source line, reproduces the failure in a copied git workspace, applies the smallest compatibility patch, and replays the same payload.”
 
 Let the five healing steps complete.
 

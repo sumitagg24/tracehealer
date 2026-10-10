@@ -71,7 +71,7 @@ export const DEMO_TRACE: AgentTrace = {
       durationMs: 22,
       error: "TypeError: Cannot read properties of undefined (reading 'email')",
       stack:
-        "TypeError: Cannot read properties of undefined (reading 'email')\n    at getCustomerEmail (src/agents/order-support.ts:47:34)\n    at resolveOrder (src/agents/order-support.ts:81:17)",
+        "TypeError: Cannot read properties of undefined (reading 'email')\n    at getCustomerEmail (src/order-support.mjs:9:34)\n    at resolveReceiptRequest (src/order-support.mjs:16:16)",
       attributes: { retry: 3, "code.version": "8d2f19c" },
     },
     {
@@ -103,11 +103,11 @@ export const DEMO_INCIDENT: Incident = {
   owner: "Support agents",
 };
 
-export const BEFORE_SOURCE = `export function getCustomerEmail(response: OrderApiResponse) {
+export const BEFORE_SOURCE = `export function getCustomerEmail(response) {
   return response.order.customer.email.toLowerCase();
 }`;
 
-export const AFTER_SOURCE = `export function getCustomerEmail(response: OrderApiResponse) {
+export const AFTER_SOURCE = `export function getCustomerEmail(response) {
   const email =
     response.order.customer?.email ??
     response.order.contact?.primaryEmail;
@@ -119,8 +119,8 @@ export const AFTER_SOURCE = `export function getCustomerEmail(response: OrderApi
   return email.toLowerCase();
 }`;
 
-export const DEMO_DIFF = `@@ -45,3 +45,11 @@
- export function getCustomerEmail(response: OrderApiResponse) {
+export const DEMO_DIFF = `@@ -6,7 +6,15 @@
+ export function getCustomerEmail(response) {
 -  return response.order.customer.email.toLowerCase();
 +  const email =
 +    response.order.customer?.email ??
