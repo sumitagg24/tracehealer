@@ -9,6 +9,11 @@ export interface RepositoryContext {
   checkpointId: string | null;
 }
 
+/** Keep persisted repository paths stable across Windows, macOS, and Linux. */
+export function normalizeRepositoryPath(file: string) {
+  return file.replaceAll("\\", "/");
+}
+
 async function sourceFiles(root: string, current = root): Promise<string[]> {
   const entries = await readdir(current, { withFileTypes: true });
   const files: string[] = [];
@@ -16,7 +21,7 @@ async function sourceFiles(root: string, current = root): Promise<string[]> {
     if (entry.name === ".git" || entry.name === "node_modules") continue;
     const absolute = path.join(current, entry.name);
     if (entry.isDirectory()) files.push(...(await sourceFiles(root, absolute)));
-    else if (/\.(?:mjs|js|ts|tsx|json)$/.test(entry.name)) files.push(path.relative(root, absolute));
+    else if (/\.(?:mjs|js|ts|tsx|json)$/.test(entry.name)) files.push(normalizeRepositoryPath(path.relative(root, absolute)));
   }
   return files;
 }
