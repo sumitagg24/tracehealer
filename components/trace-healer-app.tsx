@@ -3,7 +3,6 @@
 import {
   Activity,
   AlertTriangle,
-  ArrowDown,
   ArrowUpRight,
   Bell,
   Bot,
@@ -22,8 +21,6 @@ import {
   ListChecks,
   LoaderCircle,
   Menu,
-  MoreHorizontal,
-  Radio,
   RotateCcw,
   Search,
   Settings2,
@@ -33,23 +30,36 @@ import {
   X,
   Zap,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { BrandMark } from "@/components/brand-mark";
 import { DEMO_INCIDENT, DEMO_TRACE } from "@/lib/demo-data";
-import type { HealResult, TraceSpan } from "@/lib/types";
+import { isTerminal } from "@/lib/run-state";
+import type { AuditEvent, HealResult, RunState, RunSummary, TraceSpan } from "@/lib/types";
 
 type Tab = "trace" | "diagnosis" | "patch";
-type RunState = "idle" | "running" | "complete" | "error";
-type Page = "incident" | "overview" | "incidents" | "runs" | "evaluations" | "repositories" | "integrations";
+type RunStateView = "idle" | "running" | "complete" | "error";
+type Page = "overview" | "incidents" | "incident" | "runs" | "run" | "evaluations" | "repositories" | "integrations";
 
-type IntegrationSnapshot = {
+interface IntegrationSnapshot {
   github: { configured: boolean; autoPublish: boolean };
   neatlogs: { configured: boolean; signedWebhooks: boolean };
   slack: { configured: boolean };
   openai: { configured: boolean; model: string };
   entire: { configured: boolean };
   sandbox: { configured: boolean; provider: string };
-};
+}
+
+interface MetricsSnapshot {
+  runCount: number;
+  activeRuns: number;
+  healed: number;
+  needsReview: number;
+  successRatePercent: number;
+  deliveryFailureRuns: number;
+  timeoutCount: number;
+  cancelledCount: number;
+  averageDurationMs: number | null;
+}
 
 const workflow = [
   { id: "capture", label: "Read failure trace", detail: "Import spans, inputs, and runtime context" },
@@ -59,15 +69,51 @@ const workflow = [
   { id: "proposal", label: "Prepare review", detail: "Package evidence in a draft proposal" },
 ];
 
-const spanWidths: Record<string, { left: number; width: number }> = {
-  sp_root: { left: 0, width: 100 },
-  sp_llm_1: { left: 2, width: 17 },
-  sp_tool: { left: 20, width: 8 },
-  sp_parse: { left: 29, width: 4 },
-  sp_retry: { left: 32, width: 67 },
+/** Maps the server lifecycle to the step index the UI is allowed to display. */
+const STEP_FOR_STATE: Record<RunState, number> = {
+  queued: 0,
+  reproducing: 0,
+  diagnosing: 1,
+  patching: 2,
+  verifying: 3,
+  committing: 3,
+  publishing: 4,
+  healed: 5,
+  "needs-review": 5,
+  "delivery-failed": 5,
+  cancelled: 5,
+  "timed-out": 5,
 };
 
-const wait = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, ms));
+const STATE_LABELS: Record<RunState, string> = {
+  queued: "Queued",
+  reproducing: "Reproducing failure",
+  diagnosing: "Diagnosing",
+  patching: "Patching",
+  verifying: "Verifying",
+  committing: "Committing",
+  publishing: "Publishing draft",
+  healed: "Healed",
+  "needs-review": "Needs review",
+  "delivery-failed": "Delivery failed",
+  cancelled: "Cancelled",
+  "timed-out": "Timed out",
+};
+
+const STATE_TONE: Record<RunState, "ok" | "warn" | "bad" | "muted"> = {
+  queued: "muted",
+  reproducing: "warn",
+  diagnosing: "warn",
+  patching: "warn",
+  verifying: "warn",
+  committing: "warn",
+  publishing: "warn",
+  healed: "ok",
+  "needs-review": "bad",
+  "delivery-failed": "bad",
+  cancelled: "muted",
+  "timed-out": "bad",
+};
 
 function GitHubIcon({ size = 18 }: { size?: number }) {
   return (
@@ -85,20 +131,57 @@ function formatDuration(ms: number) {
   return ms >= 1000 ? `${(ms / 1000).toFixed(ms % 1000 === 0 ? 0 : 2)}s` : `${ms}ms`;
 }
 
+function formatTime(value: string | null | undefined) {
+  if (!value) return "—";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "—" : date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+function StateBadge({ state }: { state: RunState }) {
+  return (
+    <span className={`state-badge state-${STATE_TONE[state]}`}>
+      <span aria-hidden="true" />
+      {STATE_LABELS[state]}
+    </span>
+  );
+}
+
+function EmptyState({ title, body, action }: { title: string; body: string; action?: React.ReactNode }) {
+  return (
+    <div className="empty-state" role="note">
+      <h3>{title}</h3>
+      <p>{body}</p>
+      {action}
+    </div>
+  );
+}
+
+function StatusRegion({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="sr-status" role="status" aria-live="polite">
+      {children}
+    </div>
+  );
+}
+
 function Sidebar({
   open,
   activePage,
+  openIncidents,
+  systemOnline,
   onClose,
   onNavigate,
 }: {
   open: boolean;
   activePage: Page;
+  openIncidents: number;
+  systemOnline: boolean;
   onClose: () => void;
   onNavigate: (page: Page) => void;
 }) {
   const nav: Array<{ icon: typeof LayoutDashboard; label: string; page: Page; count?: number }> = [
     { icon: LayoutDashboard, label: "Overview", page: "overview" },
-    { icon: AlertTriangle, label: "Incidents", page: "incidents", count: 1 },
+    { icon: AlertTriangle, label: "Incidents", page: "incidents", count: openIncidents || undefined },
     { icon: HeartPulse, label: "Healing runs", page: "runs" },
     { icon: ListChecks, label: "Evaluations", page: "evaluations" },
   ];
@@ -116,16 +199,20 @@ function Sidebar({
           <BrandMark className="brand-mark" />
           <span>tracehealer</span>
           <span className="beta-tag">BETA</span>
-          <span className="mobile-close" onClick={(event) => { event.stopPropagation(); onClose(); }} aria-label="Close menu" role="button">
+          <span className="mobile-close" aria-hidden="true">
             <X size={18} />
           </span>
         </button>
 
-        <button className="workspace-switcher">
+        <button
+          className="workspace-switcher"
+          disabled
+          title="This build targets a single configured workspace"
+        >
           <span className="workspace-avatar">N</span>
           <span>
             <strong>NeatHack Lab</strong>
-            <small>Production workspace</small>
+            <small>Single workspace · switching disabled</small>
           </span>
           <ChevronDown size={14} />
         </button>
@@ -134,7 +221,7 @@ function Sidebar({
           <p className="nav-label">MONITOR</p>
           {nav.map((item) => (
             <button
-              className={`nav-item ${activePage === item.page || (item.page === "incidents" && activePage === "incident") ? "active" : ""}`}
+              className={`nav-item ${activePage === item.page || (item.page === "incidents" && (activePage === "incident" || activePage === "run")) ? "active" : ""}`}
               key={item.label}
               onClick={() => navigate(item.page)}
             >
@@ -151,25 +238,23 @@ function Sidebar({
           <button className={`nav-item ${activePage === "integrations" ? "active" : ""}`} onClick={() => navigate("integrations")}>
             <Settings2 size={17} strokeWidth={1.8} />
             <span>Integrations</span>
-            <span className="connected-dot" />
           </button>
         </nav>
 
         <div className="sidebar-bottom">
           <div className="system-status">
-            <span className="status-orbit"><span /></span>
+            <span className={`status-orbit ${systemOnline ? "" : "offline"}`}><span /></span>
             <div>
-              <strong>All systems operational</strong>
-              <small>Watching 3 agents</small>
+              <strong>{systemOnline ? "Service reachable" : "Service offline"}</strong>
+              <small>Live from /api/health</small>
             </div>
           </div>
           <div className="user-row">
             <div className="user-avatar">S</div>
             <div>
-              <strong>Sumit</strong>
-              <small>Builder plan</small>
+              <strong>Operator</strong>
+              <small>Local session</small>
             </div>
-            <MoreHorizontal size={17} />
           </div>
         </div>
       </aside>
@@ -179,10 +264,11 @@ function Sidebar({
 
 function Topbar({ page, onMenu }: { page: Page; onMenu: () => void }) {
   const labels: Record<Page, string> = {
-    incident: "INC-2841",
     overview: "Overview",
     incidents: "Incidents",
+    incident: "Incident detail",
     runs: "Healing runs",
+    run: "Run detail",
     evaluations: "Evaluations",
     repositories: "Repositories",
     integrations: "Integrations",
@@ -194,19 +280,16 @@ function Topbar({ page, onMenu }: { page: Page; onMenu: () => void }) {
       </button>
       <div className="crumbs">
         <span>NeatHack Lab</span>
-        <span>/</span>
+        <span aria-hidden="true">/</span>
         <strong>{labels[page]}</strong>
       </div>
       <div className="topbar-actions">
-        <div className="command-search">
+        <button className="command-search" disabled title="Global search is not enabled in this build">
           <Search size={15} />
-          <span>Search traces, runs...</span>
-          <kbd>⌘ K</kbd>
-        </div>
-        <div className="live-pill"><span /> LIVE</div>
-        <button className="icon-button" aria-label="Notifications">
+          <span>Search unavailable</span>
+        </button>
+        <button className="icon-button" aria-label="Notifications unavailable in this build" disabled title="Notifications are delivered through configured integrations, not this bell">
           <Bell size={17} />
-          <span className="notification-dot" />
         </button>
         <a
           className="icon-button"
@@ -227,14 +310,13 @@ function TraceWaterfall({ selected, onSelect }: { selected: string; onSelect: (i
     <div className="trace-panel" id="trace">
       <div className="trace-toolbar">
         <div>
-          <span className="eyebrow">TRACE</span>
+          <span className="eyebrow">SEEDED DEMO TRACE</span>
           <strong>{DEMO_TRACE.id}</strong>
         </div>
         <div className="trace-summary">
-          <span><Clock3 size={13} /> 6.84s</span>
-          <span><Zap size={13} /> 4,280 tokens</span>
-          <span><CircleDollarSign size={13} /> $0.0284</span>
-          <button aria-label="More trace options"><MoreHorizontal size={16} /></button>
+          <span><Clock3 size={13} /> {formatDuration(DEMO_TRACE.durationMs)}</span>
+          <span><Zap size={13} /> {DEMO_TRACE.tokens.toLocaleString()} tokens</span>
+          <span><CircleDollarSign size={13} /> {formatMoney(DEMO_TRACE.costUsd)}</span>
         </div>
       </div>
       <div className="waterfall-head">
@@ -242,14 +324,13 @@ function TraceWaterfall({ selected, onSelect }: { selected: string; onSelect: (i
         <div className="ticks"><span>0s</span><span>2s</span><span>4s</span><span>6.8s</span></div>
       </div>
       <div className="waterfall-list">
-        {DEMO_TRACE.spans.map((span, index) => (
+        {DEMO_TRACE.spans.map((span) => (
           <SpanRow
             key={span.id}
             span={span}
             depth={span.parentId ? 1 : 0}
             selected={selected === span.id}
             onSelect={() => onSelect(span.id)}
-            index={index}
           />
         ))}
       </div>
@@ -263,29 +344,28 @@ function SpanRow({
   depth,
   selected,
   onSelect,
-  index,
 }: {
   span: TraceSpan;
   depth: number;
   selected: boolean;
   onSelect: () => void;
-  index: number;
 }) {
-  const bar = spanWidths[span.id] ?? { left: index * 5, width: 20 };
+  const fraction = Math.max(0.02, Math.min(span.durationMs / DEMO_TRACE.durationMs, 1));
+  const startFraction = span.parentId ? Math.min(0.05 + (span.durationMs / DEMO_TRACE.durationMs) * 0.1, 0.6) : 0;
   return (
-    <button className={`span-row ${selected ? "selected" : ""}`} onClick={onSelect}>
+    <button className={`span-row ${selected ? "selected" : ""}`} onClick={onSelect} aria-pressed={selected}>
       <span className="span-name" style={{ paddingLeft: `${14 + depth * 17}px` }}>
-        {depth ? <span className="tree-elbow">└</span> : null}
-        <span className={`span-status ${span.status}`} />
+        {depth ? <span className="tree-elbow" aria-hidden="true">└</span> : null}
+        <span className={`span-status ${span.status}`} aria-hidden="true" />
         <span>{span.name}</span>
-        {span.status === "error" ? <AlertTriangle size={12} /> : null}
+        {span.status === "error" ? <AlertTriangle size={12} aria-label="error" /> : null}
       </span>
       <span className="span-lane">
         <span
           className={`span-bar ${span.status}`}
-          style={{ left: `${bar.left}%`, width: `${Math.max(bar.width, 3)}%` }}
+          style={{ left: `${startFraction * 100}%`, width: `${fraction * 100}%` }}
         >
-          {bar.width > 13 ? <small>{formatDuration(span.durationMs)}</small> : null}
+          {fraction > 0.13 ? <small>{formatDuration(span.durationMs)}</small> : null}
         </span>
       </span>
       <span className="span-time">{formatDuration(span.durationMs)}</span>
@@ -294,16 +374,27 @@ function SpanRow({
 }
 
 function SpanInspector({ span }: { span: TraceSpan }) {
+  const [copied, setCopied] = useState(false);
   const isError = span.status === "error";
   return (
     <div className="span-inspector">
       <div className="inspector-head">
         <div>
-          <span className={`span-status ${span.status}`} />
+          <span className={`span-status ${span.status}`} aria-hidden="true" />
           <strong>{span.name}</strong>
           <span className="service-badge">{span.service}</span>
         </div>
-        <button aria-label="Copy span id"><Copy size={13} /> {span.id}</button>
+        <button
+          aria-label={`Copy span id ${span.id}`}
+          onClick={() => {
+            void navigator.clipboard?.writeText(span.id).then(() => {
+              setCopied(true);
+              window.setTimeout(() => setCopied(false), 1500);
+            });
+          }}
+        >
+          <Copy size={13} /> {copied ? "Copied" : span.id}
+        </button>
       </div>
       {isError ? (
         <div className="error-callout">
@@ -323,30 +414,26 @@ function SpanInspector({ span }: { span: TraceSpan }) {
   );
 }
 
-function DiagnosisView({ result }: { result: HealResult | null }) {
-  const diagnosis = result?.diagnosis;
+function DiagnosisView({ result, loading }: { result: HealResult | null; loading: boolean }) {
+  if (loading) return <LoadingBlock label="Diagnosing the failure…" />;
+  if (!result) {
+    return <EmptyState title="No diagnosis yet" body="Run the healer to isolate the root cause from this trace." />;
+  }
+  const diagnosis = result.diagnosis;
   return (
     <div className="diagnosis-view">
       <div className="confidence-card">
-        <div className="confidence-ring"><span>{diagnosis ? Math.round(diagnosis.confidence * 100) : 96}%</span></div>
+        <div className="confidence-ring"><span>{Math.round(diagnosis.confidence * 100)}%</span></div>
         <div>
           <span className="eyebrow">ROOT CAUSE CONFIDENCE</span>
-          <h3>{diagnosis?.summary ?? "Upstream response drift bypassed the agent's contract guard"}</h3>
-          <p>
-            {diagnosis?.rootCause ??
-              "Order API v3 returns contact.primaryEmail, while the agent still dereferences customer.email. The undefined property throws before the agent can answer."}
-          </p>
+          <h3>{diagnosis.summary}</h3>
+          <p>{diagnosis.rootCause}</p>
         </div>
       </div>
       <div className="evidence-grid">
         <div className="evidence-block">
           <span className="section-label">Evidence chain</span>
-          {(diagnosis?.evidence ?? [
-            "order.normalize raised a property access TypeError",
-            "Top frame: src/agents/order-support.ts:47",
-            "lookup_order returned HTTP 200 with api.version v3",
-            "Retry loop consumed 3,358 unnecessary tokens",
-          ]).map((item, index) => (
+          {diagnosis.evidence.map((item, index) => (
             <div className="evidence-row" key={item}>
               <span>{index + 1}</span><p>{item}</p>
             </div>
@@ -356,12 +443,12 @@ function DiagnosisView({ result }: { result: HealResult | null }) {
           <span className="section-label">Detected contract change</span>
           <div className="contract-code">
             <div><span className="minus">−</span><code>order.customer.email</code></div>
-            <ArrowDown size={14} />
+            <span aria-hidden="true">↓</span>
             <div><span className="plus">+</span><code>order.contact.primaryEmail</code></div>
           </div>
           <div className="source-chip">
-            <FileCode2 size={14} /> {diagnosis?.file ?? "src/order-support.mjs"}
-            <span>Line {diagnosis?.line ?? 9}</span>
+            <FileCode2 size={14} /> {diagnosis.file}
+            <span>Line {diagnosis.line}</span>
           </div>
         </div>
       </div>
@@ -374,20 +461,21 @@ function DiffLine({ line }: { line: string }) {
   const kind = marker === "+" ? "added" : marker === "-" ? "removed" : marker === "@" ? "range" : "plain";
   return (
     <div className={`diff-line ${kind}`}>
-      <span className="diff-marker">{kind === "plain" ? " " : marker}</span>
+      <span className="diff-marker" aria-hidden="true">{kind === "plain" ? " " : marker}</span>
       <code>{kind === "plain" ? line : line.slice(1)}</code>
     </div>
   );
 }
 
-function PatchView({ result, onHeal }: { result: HealResult | null; onHeal: () => void }) {
+function PatchView({ result, loading, onHeal, canRun }: { result: HealResult | null; loading: boolean; onHeal: () => void; canRun: boolean }) {
+  if (loading) return <LoadingBlock label="Generating the minimal patch…" />;
   if (!result) {
     return (
       <div className="empty-patch">
         <div className="empty-patch-icon"><Code2 size={24} /></div>
         <h3>No patch generated yet</h3>
         <p>Run TraceHealer to diagnose this failure, generate the smallest safe fix, and replay the exact input.</p>
-        <button className="primary-button compact" onClick={onHeal}><Sparkles size={15} /> Heal this incident</button>
+        <button className="primary-button compact" onClick={onHeal} disabled={!canRun}><Sparkles size={15} /> Heal this incident</button>
       </div>
     );
   }
@@ -407,8 +495,16 @@ function PatchView({ result, onHeal }: { result: HealResult | null; onHeal: () =
         <span>{result.patch.language}</span>
       </div>
       <div className="diff-block">
-        {result.patch.diff.split("\n").map((line, index) => <DiffLine line={line} key={`${line}-${index}`} />)}
+        {result.patch.diff.split("\n").map((line, index) => <DiffLine line={line} key={`${index}-${line}`} />)}
       </div>
+    </div>
+  );
+}
+
+function LoadingBlock({ label }: { label: string }) {
+  return (
+    <div className="loading-block" role="status">
+      <LoaderCircle className="spin" size={18} /> {label}
     </div>
   );
 }
@@ -418,35 +514,41 @@ function HealingAgent({
   activeStep,
   result,
   error,
+  canRun,
   onRun,
   onReview,
+  onCancel,
 }: {
-  state: RunState;
+  state: RunStateView;
   activeStep: number;
   result: HealResult | null;
   error: string | null;
+  canRun: boolean;
   onRun: () => void;
   onReview: () => void;
+  onCancel: () => void;
 }) {
   return (
-    <aside className={`healer-card ${state}`}>
-      <div className="healer-glow" />
+    <aside className={`healer-card ${state}`} aria-label="Autonomous healer">
+      <div className="healer-glow" aria-hidden="true" />
       <div className="healer-head">
         <div className="agent-avatar"><Bot size={19} /></div>
         <div>
           <span className="eyebrow">AUTONOMOUS HEALER</span>
-          <strong>{state === "complete" ? "Incident contained" : state === "running" ? "Healing in progress" : "Ready to investigate"}</strong>
+          <strong>
+            {state === "complete" ? "Run settled" : state === "running" ? "Healing in progress" : "Ready to investigate"}
+          </strong>
         </div>
-        {state === "running" ? <LoaderCircle className="spin" size={18} /> : state === "complete" ? <CheckCircle2 className="success-icon" size={19} /> : <Radio size={18} />}
+        {state === "running" ? <LoaderCircle className="spin" size={18} /> : state === "complete" ? <CheckCircle2 className="success-icon" size={19} /> : <Activity size={18} />}
       </div>
 
-      <div className="workflow">
+      <ol className="workflow">
         {workflow.map((step, index) => {
-          const complete = state === "complete" || index < activeStep;
+          const complete = state === "complete" || (state === "running" && index < activeStep);
           const active = state === "running" && index === activeStep;
           return (
-            <div className={`workflow-step ${complete ? "step-complete" : ""} ${active ? "step-active" : ""}`} key={step.id}>
-              <div className="workflow-rail">
+            <li className={`workflow-step ${complete ? "step-complete" : ""} ${active ? "step-active" : ""}`} key={step.id}>
+              <div className="workflow-rail" aria-hidden="true">
                 <span>{complete ? <Check size={12} strokeWidth={3} /> : active ? <LoaderCircle className="spin" size={12} /> : index + 1}</span>
                 {index < workflow.length - 1 ? <i /> : null}
               </div>
@@ -454,19 +556,21 @@ function HealingAgent({
                 <strong>{result?.steps[index]?.label ?? step.label}</strong>
                 <p>{complete && result ? result.steps[index].detail : step.detail}</p>
               </div>
-              {complete && result ? <small>{result.steps[index].durationMs < 1000 ? `${result.steps[index].durationMs}ms` : `${(result.steps[index].durationMs / 1000).toFixed(1)}s`}</small> : null}
-            </div>
+              {complete && result ? <small>{formatDuration(result.steps[index].durationMs)}</small> : null}
+            </li>
           );
         })}
-      </div>
+      </ol>
 
-      {error ? <div className="run-error"><AlertTriangle size={15} /> {error}</div> : null}
+      {error ? <div className="run-error" role="alert"><AlertTriangle size={15} /> {error}</div> : null}
 
       {state === "complete" && result ? (
         <div className="healed-summary">
-          <div className="healed-check"><Check size={18} strokeWidth={3} /></div>
+          <div className="healed-check" aria-hidden="true"><Check size={18} strokeWidth={3} /></div>
           <div>
-            <strong>Verified in an isolated workspace</strong>
+            <strong>
+              {result.status === "healed" ? "Verified in an isolated workspace" : "Needs review — no verified fix"}
+            </strong>
             <span>
               {result.verification.checks.filter((check) => check.status === "passed").length}/{result.verification.checks.length} checks passed
               {result.artifacts?.localCommit ? ` · commit ${result.artifacts.localCommit}` : ""}
@@ -475,48 +579,68 @@ function HealingAgent({
         </div>
       ) : null}
 
-      <button
-        className={`agent-button ${state === "complete" ? "review" : ""}`}
-        disabled={state === "running"}
-        onClick={state === "complete" ? onReview : onRun}
-      >
-        {state === "running" ? <><LoaderCircle className="spin" size={16} /> Running healer...</> : state === "complete" ? <><GitBranch size={16} /> Review proposed patch <ArrowUpRight size={15} /></> : <><Sparkles size={16} /> Heal this incident</>}
-      </button>
+      {state === "running" ? (
+        <button className="agent-button" onClick={onCancel}>
+          <X size={16} /> Cancel run
+        </button>
+      ) : (
+        <button
+          className={`agent-button ${state === "complete" ? "review" : ""}`}
+          disabled={!canRun && state !== "complete"}
+          onClick={state === "complete" ? onReview : onRun}
+        >
+          {state === "complete" ? <><GitBranch size={16} /> Review proposed patch <ArrowUpRight size={15} /></> : <><Sparkles size={16} /> Heal this incident</>}
+        </button>
+      )}
       <p className="agent-footnote"><ShieldCheck size={12} /> Review required · TraceHealer never merges automatically</p>
     </aside>
   );
 }
 
-function ProofPanel({ result }: { result: HealResult }) {
+function ProofPanel({ result, onPublish, publishing, publishMessage }: {
+  result: HealResult;
+  onPublish: () => void;
+  publishing: boolean;
+  publishMessage: string | null;
+}) {
   const metrics = [
     { label: "Latency", before: formatDuration(result.verification.before.durationMs), after: formatDuration(result.verification.after.durationMs), percent: result.verification.improvements.latencyPercent },
     { label: "Tokens", before: result.verification.before.tokens.toLocaleString(), after: result.verification.after.tokens.toLocaleString(), percent: result.verification.improvements.tokenPercent },
     { label: "Cost / run", before: formatMoney(result.verification.before.costUsd), after: formatMoney(result.verification.after.costUsd), percent: result.verification.improvements.costPercent },
   ];
+  const allPassed = result.verification.checks.every((check) => check.status === "passed");
+  const canPublish = result.status === "healed" && result.verification.passed && result.artifacts?.beforeReproduced && !result.proposal.url;
+
   return (
-    <section className="proof-section">
+    <section className="proof-section" aria-labelledby="verification-heading">
       <div className="proof-heading">
         <div className="proof-icon"><ShieldCheck size={19} /></div>
-        <div><span className="eyebrow">VERIFICATION REPORT</span><h2>Same input. Measurably better run.</h2></div>
-        <span className="passed-pill"><Check size={13} /> ALL CHECKS PASSED</span>
+        <div><span className="eyebrow">VERIFICATION REPORT</span><h2 id="verification-heading">Same input. Measurably better run.</h2></div>
+        <span className={`passed-pill ${allPassed ? "" : "failed"}`}>
+          {allPassed ? <><Check size={13} /> ALL CHECKS PASSED</> : <><AlertTriangle size={13} /> CHECKS FAILED</>}
+        </span>
       </div>
       <div className="proof-grid">
         {metrics.map((metric) => (
           <div className="proof-metric" key={metric.label}>
             <span>{metric.label}</span>
-            <div><s>{metric.before}</s><ArrowDown size={14} /><strong>{metric.after}</strong></div>
+            <div><s>{metric.before}</s><span aria-hidden="true">↓</span><strong>{metric.after}</strong></div>
             <small>↓ {metric.percent}%</small>
           </div>
         ))}
         <div className="proof-metric success-metric">
           <span>Trace status</span>
-          <div><s>FAILED</s><ArrowDown size={14} /><strong>HEALTHY</strong></div>
-          <small><Check size={12} /> 0 errors</small>
+          <div><s>FAILED</s><span aria-hidden="true">↓</span><strong>{allPassed ? "HEALTHY" : "UNCHANGED"}</strong></div>
+          <small>{result.verification.after.errors} errors</small>
         </div>
       </div>
       <div className="test-strip">
         {result.verification.checks.map((check) => (
-          <div key={check.name}><CheckCircle2 size={14} /><span>{check.name}</span><small>{check.durationMs}ms</small></div>
+          <div key={check.name}>
+            {check.status === "passed" ? <CheckCircle2 size={14} /> : <AlertTriangle size={14} />}
+            <span>{check.name}</span>
+            <small>{check.durationMs}ms</small>
+          </div>
         ))}
       </div>
       {result.artifacts ? (
@@ -529,65 +653,231 @@ function ProofPanel({ result }: { result: HealResult }) {
           <div className="artifact-actions">
             <a href={`/api/artifacts/${result.id}/patch`} target="_blank" rel="noreferrer"><FileCode2 size={13} /> Patch artifact</a>
             <a href={`/api/artifacts/${result.id}/report`} target="_blank" rel="noreferrer"><ExternalLink size={13} /> Verification JSON</a>
+            {canPublish ? (
+              <button className="secondary-button compact" onClick={onPublish} disabled={publishing}>
+                {publishing ? <><LoaderCircle className="spin" size={13} /> Publishing…</> : <><GitBranch size={13} /> Publish draft PR</>}
+              </button>
+            ) : null}
           </div>
         </div>
       ) : null}
+      {publishMessage ? <p className="publish-message" role="status">{publishMessage}</p> : null}
     </section>
   );
 }
 
-function ValueStrip() {
-  const values = [
-    { label: "Traces watched", value: "12,481", detail: "this month", icon: Activity },
-    { label: "Auto-diagnosed", value: "94.2%", detail: "+3.4%", icon: Bot },
-    { label: "Engineer time saved", value: "46.5h", detail: "≈ $5,580", icon: Clock3 },
-    { label: "Mean time to patch", value: "4.8s", detail: "↓ 81%", icon: Zap },
+function MetricsStrip({ metrics, loading }: { metrics: MetricsSnapshot | null; loading: boolean }) {
+  const items = [
+    { label: "Persisted runs", value: metrics ? metrics.runCount.toString() : "—", detail: "audit records" },
+    { label: "Verified healed", value: metrics ? metrics.healed.toString() : "—", detail: `${metrics?.successRatePercent ?? 0}% of settled` },
+    { label: "Needs review", value: metrics ? metrics.needsReview.toString() : "—", detail: "no fabricated fix" },
+    { label: "Avg run time", value: metrics?.averageDurationMs ? formatDuration(metrics.averageDurationMs) : "—", detail: "server measured" },
   ];
   return (
-    <section className="value-strip">
-      {values.map((item) => (
+    <section className="value-strip" aria-label="Live persisted metrics" data-loading={loading}>
+      {items.map((item) => (
         <div className="value-item" key={item.label}>
-          <div className="value-icon"><item.icon size={16} /></div>
+          <div className="value-icon" aria-hidden="true"><Activity size={16} /></div>
           <div><span>{item.label}</span><strong>{item.value}</strong></div>
-          <small>{item.detail}</small>
+          <small>{loading ? "loading…" : item.detail}</small>
         </div>
       ))}
     </section>
   );
 }
 
+function RunTimeline({ events, summary }: { events: AuditEvent[]; summary: RunSummary | null }) {
+  if (!events.length) {
+    return <EmptyState title="No audit events yet" body="Server-side progress appears here as the run advances." />;
+  }
+  return (
+    <ol className="timeline">
+      {events.map((event) => (
+        <li key={event.seq}>
+          <span className={`timeline-dot state-${STATE_TONE[event.state]}`} aria-hidden="true" />
+          <div>
+            <strong>{STATE_LABELS[event.state]}</strong>
+            <p>{event.message}</p>
+            <small>{formatTime(event.at)} · seq {event.seq} · attempt {event.attempt}</small>
+          </div>
+        </li>
+      ))}
+      {summary && isTerminal(summary.state) ? (
+        <li>
+          <span className="timeline-dot state-ok" aria-hidden="true" />
+          <div><strong>Settled</strong><p>{STATE_LABELS[summary.state]}</p><small>{formatTime(summary.completedAt)}</small></div>
+        </li>
+      ) : null}
+    </ol>
+  );
+}
+
+function RunDetail({
+  run,
+  summary,
+  events,
+  loading,
+  error,
+  onOpenRun,
+}: {
+  run: HealResult | null;
+  summary: RunSummary | null;
+  events: AuditEvent[];
+  loading: boolean;
+  error: string | null;
+  onOpenRun: (id: string) => void;
+}) {
+  if (loading) return <LoadingBlock label="Loading run detail…" />;
+  if (error) return <div className="error-banner" role="alert"><AlertTriangle size={16} /> {error}</div>;
+  if (!run && !summary) {
+    return <EmptyState title="Run not found" body="This healing run does not exist or has been removed." />;
+  }
+
+  const state = summary?.state ?? run?.state ?? "needs-review";
+  return (
+    <section className="management-page" aria-labelledby="run-detail-heading">
+      <div className="management-heading">
+        <div>
+          <span className="eyebrow">RUN DETAIL</span>
+          <h1 id="run-detail-heading">{summary?.id ?? run?.id}</h1>
+          <p>Repository context, verification checks, bounded logs, metrics, delivery attempts, and artifacts.</p>
+        </div>
+        <StateBadge state={state} />
+      </div>
+
+      <div className="run-detail-grid">
+        <div className="management-card">
+          <span className="section-label">Timeline</span>
+          <RunTimeline events={events} summary={summary} />
+        </div>
+
+        <div className="management-card">
+          <span className="section-label">Context</span>
+          <dl>
+            <div><dt>Trace</dt><dd><code>{summary?.traceId ?? run?.traceId ?? "—"}</code></dd></div>
+            <div><dt>Mode</dt><dd>{run?.mode ?? summary?.mode ?? "—"}</dd></div>
+            <div><dt>Repository file</dt><dd><code>{run?.patch.file ?? "—"}</code></dd></div>
+            <div><dt>Local commit</dt><dd><code>{run?.artifacts?.localCommit ?? "—"}</code></dd></div>
+            <div><dt>Context files</dt><dd>{run?.context?.filesInspected.length ?? 0}</dd></div>
+            <div><dt>Strategy</dt><dd>{run?.context?.provider ?? "—"}</dd></div>
+          </dl>
+          {run?.context?.filesInspected.length ? (
+            <ul className="context-files">
+              {run.context.filesInspected.slice(0, 12).map((file) => <li key={file}><code>{file}</code></li>)}
+            </ul>
+          ) : null}
+        </div>
+
+        <div className="management-card">
+          <span className="section-label">Checks</span>
+          {run?.verification.checks.length ? (
+            <ul className="check-list">
+              {run.verification.checks.map((check) => (
+                <li key={check.name}>
+                  {check.status === "passed" ? <CheckCircle2 size={15} /> : <AlertTriangle size={15} />}
+                  <span>{check.name}</span>
+                  <small>{check.status}</small>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="muted-note">No verification checks recorded.</p>
+          )}
+        </div>
+
+        <div className="management-card">
+          <span className="section-label">Metrics</span>
+          {run ? (
+            <dl>
+              <div><dt>Latency</dt><dd>{formatDuration(run.verification.before.durationMs)} → {formatDuration(run.verification.after.durationMs)}</dd></div>
+              <div><dt>Tokens</dt><dd>{run.verification.before.tokens.toLocaleString()} → {run.verification.after.tokens.toLocaleString()}</dd></div>
+              <div><dt>Cost</dt><dd>{formatMoney(run.verification.before.costUsd)} → {formatMoney(run.verification.after.costUsd)}</dd></div>
+              <div><dt>Exit codes</dt><dd>{run.artifacts?.beforeTestExitCode ?? "—"} → {run.artifacts?.afterTestExitCode ?? "—"}</dd></div>
+            </dl>
+          ) : <p className="muted-note">Metrics appear once verification completes.</p>}
+        </div>
+
+        <div className="management-card">
+          <span className="section-label">Delivery attempts</span>
+          {run?.delivery ? (
+            <ul className="delivery-list">
+              <li><span><GitHubIcon size={14} /> GitHub draft</span><strong>{run.delivery.github}</strong></li>
+              <li><span><Activity size={14} /> After-trace export</span><strong>{run.delivery.neatlogs}</strong></li>
+              <li><span><Bell size={14} /> Slack</span><strong>{run.delivery.slack}</strong></li>
+            </ul>
+          ) : <p className="muted-note">No delivery attempted.</p>}
+          {run?.delivery?.messages.length ? (
+            <ul className="context-files">{run.delivery.messages.map((message) => <li key={message}>{message}</li>)}</ul>
+          ) : null}
+        </div>
+
+        <div className="management-card">
+          <span className="section-label">Artifacts</span>
+          {run?.artifacts ? (
+            <div className="artifact-actions vertical">
+              <a href={`/api/artifacts/${run.id}/patch`} target="_blank" rel="noreferrer"><FileCode2 size={13} /> Patch</a>
+              <a href={`/api/artifacts/${run.id}/report`} target="_blank" rel="noreferrer"><ExternalLink size={13} /> Verification JSON</a>
+            </div>
+          ) : <p className="muted-note">No artifacts for this run.</p>}
+        </div>
+      </div>
+
+      {run?.artifacts?.beforeLog ? (
+        <details className="log-details">
+          <summary>Bounded before log</summary>
+          <pre>{run.artifacts.beforeLog}</pre>
+        </details>
+      ) : null}
+      {run?.artifacts?.afterLog ? (
+        <details className="log-details">
+          <summary>Bounded after log</summary>
+          <pre>{run.artifacts.afterLog}</pre>
+        </details>
+      ) : null}
+      {run?.patch ? (
+        <div className="management-card">
+          <span className="section-label">Diff — {run.patch.file}</span>
+          <div className="diff-block">
+            {run.patch.diff.split("\n").map((line, index) => <DiffLine line={line} key={`${index}-${line}`} />)}
+          </div>
+        </div>
+      ) : null}
+
+      <p className="muted-note">Run <button className="text-action" onClick={() => onOpenRun(run?.id ?? summary?.id ?? "")}>#{run?.id ?? summary?.id}</button> is delivered as a draft only; TraceHealer never merges.</p>
+    </section>
+  );
+}
+
 function ManagementPage({
   page,
-  latestResult,
+  metrics,
+  metricsLoading,
+  integrations,
+  summaries,
+  runsLoading,
+  runsError,
   onOpenIncident,
   onRunHealer,
+  canRun,
+  healBusy,
+  onOpenRun,
 }: {
-  page: Exclude<Page, "incident">;
-  latestResult: HealResult | null;
+  page: Exclude<Page, "incident" | "run">;
+  metrics: MetricsSnapshot | null;
+  metricsLoading: boolean;
+  integrations: IntegrationSnapshot | null;
+  summaries: RunSummary[];
+  runsLoading: boolean;
+  runsError: string | null;
   onOpenIncident: () => void;
   onRunHealer: () => void;
+  canRun: boolean;
+  healBusy: boolean;
+  onOpenRun: (id: string) => void;
 }) {
-  const [runs, setRuns] = useState<HealResult[]>(latestResult ? [latestResult] : []);
-  const [integrations, setIntegrations] = useState<IntegrationSnapshot | null>(null);
+  const [filter, setFilter] = useState<"all" | "healed" | "review">("all");
 
-  useEffect(() => {
-    let current = true;
-    if (page === "runs" || page === "overview") {
-      void fetch("/api/runs?limit=10")
-        .then((response) => response.json())
-        .then((payload: { runs?: HealResult[] }) => { if (current && payload.runs) setRuns(payload.runs); })
-        .catch(() => undefined);
-    }
-    if (page === "integrations" || page === "overview" || page === "repositories") {
-      void fetch("/api/integrations")
-        .then((response) => response.json())
-        .then((payload: { integrations?: IntegrationSnapshot }) => { if (current && payload.integrations) setIntegrations(payload.integrations); })
-        .catch(() => undefined);
-    }
-    return () => { current = false; };
-  }, [page, latestResult]);
-
-  const pageMeta: Record<Exclude<Page, "incident">, { eyebrow: string; title: string; description: string }> = {
+  const pageMeta: Record<Exclude<Page, "incident" | "run">, { eyebrow: string; title: string; description: string }> = {
     overview: { eyebrow: "CONTROL CENTER", title: "Agent reliability at a glance", description: "Monitor failures, verified repairs, and every integration in the healing path." },
     incidents: { eyebrow: "INCIDENT QUEUE", title: "Production incidents", description: "Prioritized failures grouped by root-cause fingerprint and customer impact." },
     runs: { eyebrow: "AUDIT LOG", title: "Healing runs", description: "Every diagnosis, sandbox replay, patch artifact, and delivery attempt." },
@@ -597,11 +887,19 @@ function ManagementPage({
   };
   const meta = pageMeta[page];
 
+  const filtered = useMemo(() => {
+    if (filter === "healed") return summaries.filter((run) => run.state === "healed");
+    if (filter === "review") return summaries.filter((run) => run.state !== "healed");
+    return summaries;
+  }, [filter, summaries]);
+
   const heading = (
     <div className="management-heading">
       <div><span className="eyebrow">{meta.eyebrow}</span><h1>{meta.title}</h1><p>{meta.description}</p></div>
       {page === "overview" || page === "incidents" ? (
-        <button className="primary-button" onClick={onRunHealer}><Sparkles size={15} /> Run full pipeline</button>
+        <button className="primary-button" onClick={onRunHealer} disabled={!canRun || healBusy}>
+          {healBusy ? <><LoaderCircle className="spin" size={15} /> Running…</> : <><Sparkles size={15} /> Run full pipeline</>}
+        </button>
       ) : null}
     </div>
   );
@@ -610,17 +908,16 @@ function ManagementPage({
     return (
       <section className="management-page">
         {heading}
-        <ValueStrip />
+        <MetricsStrip metrics={metrics} loading={metricsLoading} />
         <div className="overview-grid">
           <div className="management-card incident-spotlight">
-            <div className="card-topline"><span className="severity-pill"><span /> CRITICAL</span><small>18 minutes ago</small></div>
-            <h2>Order support agent is failing</h2>
-            <p>Order API v3 moved the customer email field. Thirty-seven runs entered the same retry loop.</p>
-            <div className="mini-trace"><i className="ok" /><i className="ok" /><i className="error" /><i className="error long" /></div>
+            <div className="card-topline"><span className="severity-pill"><span /> CRITICAL</span><small>Seeded demo incident</small></div>
+            <h2>{DEMO_INCIDENT.title}</h2>
+            <p>{DEMO_INCIDENT.summary}</p>
             <button className="text-action" onClick={onOpenIncident}>Open incident <ArrowUpRight size={14} /></button>
           </div>
           <div className="management-card pipeline-card">
-            <div className="card-title"><span><Activity size={15} /> Healing pipeline</span><small className="healthy-label"><span /> OPERATIONAL</small></div>
+            <div className="card-title"><span><Activity size={15} /> Healing pipeline</span></div>
             <div className="pipeline-map">
               {["Trace", "Context", "Patch", "Sandbox", "Review"].map((label, index) => (
                 <div key={label}><span>{index + 1}</span><strong>{label}</strong>{index < 4 ? <i /> : null}</div>
@@ -629,22 +926,24 @@ function ManagementPage({
             <p>The local deterministic pipeline is ready. External delivery activates automatically when credentials are configured.</p>
           </div>
           <div className="management-card recent-runs-card">
-            <div className="card-title"><span><HeartPulse size={15} /> Recent runs</span><button className="text-action">View all</button></div>
-            {(runs.length ? runs.slice(0, 3) : latestResult ? [latestResult] : []).map((run) => (
-              <div className="compact-run" key={run.id}>
-                <span className={`run-state ${run.status}`}><Check size={11} /></span>
-                <div><strong>{run.diagnosis.summary}</strong><small>{run.id} · {run.artifacts?.localCommit ?? "analysis only"}</small></div>
-                <span>{run.verification.checks.filter((check) => check.status === "passed").length}/{run.verification.checks.length}</span>
-              </div>
+            <div className="card-title"><span><HeartPulse size={15} /> Recent runs</span><button className="text-action" onClick={() => onOpenRun(summaries[0]?.id ?? "")} disabled={!summaries.length}>View latest</button></div>
+            {runsError ? <div className="error-banner" role="alert">{runsError}</div> : null}
+            {runsLoading && !summaries.length ? <LoadingBlock label="Loading runs…" /> : null}
+            {!runsLoading && !summaries.length ? <div className="empty-row">Run the incident pipeline to create the first audit record.</div> : null}
+            {summaries.slice(0, 3).map((run) => (
+              <button className="compact-run" key={run.id} onClick={() => onOpenRun(run.id)}>
+                <StateBadge state={run.state} />
+                <div><strong>{run.traceId}</strong><small>{run.id} · {formatTime(run.startedAt)}</small></div>
+                <ArrowUpRight size={14} />
+              </button>
             ))}
-            {!runs.length && !latestResult ? <div className="empty-row">Run the incident pipeline to create the first audit record.</div> : null}
           </div>
           <div className="management-card readiness-card">
             <div className="card-title"><span><ShieldCheck size={15} /> Delivery readiness</span></div>
             <div className="readiness-list">
               <div><span><SquareTerminal size={14} /> Local sandbox</span><strong className="ready">READY</strong></div>
               <div><span><GitHubIcon size={14} /> GitHub drafts</span><strong className={integrations?.github.configured ? "ready" : "optional"}>{integrations?.github.configured ? "READY" : "CONFIGURE"}</strong></div>
-              <div><span><Radio size={14} /> neatlogs export</span><strong className={integrations?.neatlogs.configured ? "ready" : "optional"}>{integrations?.neatlogs.configured ? "READY" : "CONFIGURE"}</strong></div>
+              <div><span><Activity size={14} /> neatlogs export</span><strong className={integrations?.neatlogs.configured ? "ready" : "optional"}>{integrations?.neatlogs.configured ? "READY" : "CONFIGURE"}</strong></div>
             </div>
           </div>
         </div>
@@ -653,17 +952,23 @@ function ManagementPage({
   }
 
   if (page === "incidents") {
+    const healed = summaries.filter((run) => run.state === "healed").length;
     return (
       <section className="management-page">
         {heading}
-        <div className="filter-row"><button className="filter-active">Open <span>1</span></button><button>Healed <span>{latestResult ? 1 : 0}</span></button><button>All</button><div><Search size={14} /> Filter incidents</div></div>
-        <div className="data-table incident-table">
-          <div className="table-head"><span>Incident</span><span>Agent</span><span>Impact</span><span>First seen</span><span>Status</span><span /></div>
-          <button className="table-row" onClick={onOpenIncident}>
-            <span><span className="table-severity" /><span><strong>Order support agent is failing</strong><small>Schema drift · customer.email</small></span></span>
-            <span><Bot size={14} /> support-agent</span><span>37 runs</span><span>18m ago</span>
-            <span><span className={`status-chip ${latestResult ? "healed" : "open"}`}>{latestResult ? "HEALED" : "OPEN"}</span></span>
-            <span><ArrowUpRight size={14} /></span>
+        <div className="filter-row" role="group" aria-label="Filter incidents">
+          <button className={filter === "review" ? "filter-active" : ""} onClick={() => setFilter("review")}>Open <span>{Math.max(summaries.length - healed, 0)}</span></button>
+          <button className={filter === "healed" ? "filter-active" : ""} onClick={() => setFilter("healed")}>Healed <span>{healed}</span></button>
+          <button className={filter === "all" ? "filter-active" : ""} onClick={() => setFilter("all")}>All</button>
+        </div>
+        <div className="data-table incident-table" role="table" aria-label="Incidents">
+          <div className="table-head" role="row"><span role="columnheader">Incident</span><span role="columnheader">Agent</span><span role="columnheader">Runs</span><span role="columnheader">Status</span><span role="columnheader" /></div>
+          <button className="table-row" role="row" onClick={onOpenIncident}>
+            <span role="cell"><span className="table-severity" aria-hidden="true" /><span><strong>{DEMO_INCIDENT.title}</strong><small>Schema drift · customer.email</small></span></span>
+            <span role="cell"><Bot size={14} /> support-agent</span>
+            <span role="cell">{filtered.length ? `${filtered.length} healing runs` : "0 runs"}</span>
+            <span role="cell"><span className={`status-chip ${healed ? "healed" : "open"}`}>{healed ? "HEALED" : "OPEN"}</span></span>
+            <span role="cell" aria-hidden="true"><ArrowUpRight size={14} /></span>
           </button>
         </div>
       </section>
@@ -674,19 +979,30 @@ function ManagementPage({
     return (
       <section className="management-page">
         {heading}
-        <div className="data-table runs-table">
-          <div className="table-head"><span>Run</span><span>Root cause</span><span>Verification</span><span>Commit</span><span>Started</span></div>
-          {runs.map((run) => (
-            <div className="table-row" key={run.id}>
-              <span><span className={`run-state ${run.status}`}><Check size={11} /></span><span><strong>{run.id}</strong><small>{run.mode}</small></span></span>
-              <span>{run.diagnosis.category}</span>
-              <span><span className="status-chip healed">{run.verification.checks.filter((check) => check.status === "passed").length}/{run.verification.checks.length} PASSED</span></span>
-              <span><code>{run.artifacts?.localCommit ?? "—"}</code></span>
-              <span>{new Date(run.startedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
-            </div>
-          ))}
-          {!runs.length ? <div className="empty-row">No persisted healing runs yet.</div> : null}
+        <div className="filter-row" role="group" aria-label="Filter runs">
+          <button className={filter === "all" ? "filter-active" : ""} onClick={() => setFilter("all")}>All <span>{summaries.length}</span></button>
+          <button className={filter === "healed" ? "filter-active" : ""} onClick={() => setFilter("healed")}>Healed <span>{summaries.filter((run) => run.state === "healed").length}</span></button>
+          <button className={filter === "review" ? "filter-active" : ""} onClick={() => setFilter("review")}>Needs attention <span>{summaries.filter((run) => run.state !== "healed").length}</span></button>
         </div>
+        {runsError ? <div className="error-banner" role="alert"><AlertTriangle size={16} /> {runsError}</div> : null}
+        {runsLoading && !summaries.length ? <LoadingBlock label="Loading runs…" /> : null}
+        {!runsLoading && !filtered.length ? (
+          <EmptyState title="No healing runs yet" body="Run the incident pipeline to create the first persisted audit record." />
+        ) : null}
+        {filtered.length ? (
+          <div className="data-table runs-table" role="table" aria-label="Healing runs">
+            <div className="table-head" role="row"><span role="columnheader">Run</span><span role="columnheader">Trace</span><span role="columnheader">State</span><span role="columnheader">Started</span><span role="columnheader" /></div>
+            {filtered.map((run) => (
+              <button className="table-row" role="row" key={run.id} onClick={() => onOpenRun(run.id)}>
+                <span role="cell"><strong>{run.id}</strong><small>{run.mode}</small></span>
+                <span role="cell"><code>{run.traceId}</code></span>
+                <span role="cell"><StateBadge state={run.state} /></span>
+                <span role="cell">{formatTime(run.startedAt)}</span>
+                <span role="cell" aria-hidden="true"><ArrowUpRight size={14} /></span>
+              </button>
+            ))}
+          </div>
+        ) : null}
       </section>
     );
   }
@@ -698,7 +1014,7 @@ function ManagementPage({
       ["Current contract", "Verify contact.primaryEmail from Order API v3."],
       ["Typed failure", "Reject invalid payloads without an unbounded retry loop."],
       ["No automatic merge", "Always stop at a reviewable draft or local proposal."],
-      ["Minimal scope", "Keep the generated change to the localized source file."],
+      ["Minimal scope", "Keep the generated change to the allowlisted source file."],
     ];
     return (
       <section className="management-page">
@@ -715,12 +1031,12 @@ function ManagementPage({
         {heading}
         <div className="repo-card">
           <div className="repo-icon"><GitHubIcon size={21} /></div>
-          <div><h3>northstar/support-agent</h3><p>Demo target · JavaScript · main</p></div>
-          <span className="status-chip healed">CONNECTED</span>
+          <div><h3>{DEMO_TRACE.repository}</h3><p>Allowlisted target · JavaScript · {DEMO_TRACE.branch}</p></div>
+          <span className="status-chip healed">ALLOWLISTED</span>
           <button className="secondary-button" onClick={onOpenIncident}>Open incident</button>
         </div>
         <div className="repository-grid">
-          <div className="management-card"><span className="section-label">Execution policy</span><dl><div><dt>Test command</dt><dd><code>node --test</code></dd></div><div><dt>Workspace</dt><dd>Ephemeral copy</dd></div><div><dt>Timeout</dt><dd>20 seconds</dd></div><div><dt>Network</dt><dd>Disabled by strategy</dd></div></dl></div>
+          <div className="management-card"><span className="section-label">Execution policy</span><dl><div><dt>Test command</dt><dd><code>node --test</code></dd></div><div><dt>Workspace</dt><dd>Ephemeral copy</dd></div><div><dt>Network</dt><dd>Disabled by strategy</dd></div><div><dt>Protected paths</dt><dd>CI, lockfiles, tests</dd></div></dl></div>
           <div className="management-card"><span className="section-label">Publication policy</span><dl><div><dt>Target</dt><dd>Draft pull request</dd></div><div><dt>Auto merge</dt><dd>Never</dd></div><div><dt>Human review</dt><dd>Required</dd></div><div><dt>Automatic drafts</dt><dd>{integrations?.github.autoPublish ? "Enabled" : "Disabled"}</dd></div></dl></div>
         </div>
       </section>
@@ -728,11 +1044,11 @@ function ManagementPage({
   }
 
   const integrationCards = [
-    { name: "neatlogs", detail: "Failed-trace intake and verified after-trace export", configured: integrations?.neatlogs.configured, icon: Radio },
+    { name: "neatlogs", detail: "Failed-trace intake and verified after-trace export", configured: integrations?.neatlogs.configured, icon: Activity },
     { name: "GitHub", detail: "Source delivery through review-only draft pull requests", configured: integrations?.github.configured, icon: GitBranch },
     { name: "Local sandbox", detail: "Failure reproduction, test execution, and local commits", configured: true, icon: SquareTerminal },
     { name: "Entire", detail: "Optional repository graph and checkpoint context provider", configured: integrations?.entire.configured, icon: Activity },
-    { name: "OpenAI", detail: `Optional generic patch strategy · ${integrations?.openai.model ?? "gpt-5-mini"}`, configured: integrations?.openai.configured, icon: Bot },
+    { name: "OpenAI", detail: `Optional generic patch strategy · ${integrations?.openai.model ?? "not set"}`, configured: integrations?.openai.configured, icon: Bot },
     { name: "Slack", detail: "Verified-run and delivery notifications", configured: integrations?.slack.configured, icon: Bell },
   ];
   return (
@@ -752,17 +1068,234 @@ function ManagementPage({
   );
 }
 
+async function getJson<T>(url: string): Promise<T> {
+  const response = await fetch(url, { cache: "no-store" });
+  const payload = (await response.json()) as T & { ok?: boolean; error?: string };
+  if (!response.ok || payload.ok === false) throw new Error(payload.error ?? `Request failed (${response.status})`);
+  return payload as T;
+}
+
 export function TraceHealerApp() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [activePage, setActivePage] = useState<Page>("incident");
   const [tab, setTab] = useState<Tab>("trace");
   const [selectedSpan, setSelectedSpan] = useState("sp_parse");
-  const [runState, setRunState] = useState<RunState>("idle");
-  const [activeStep, setActiveStep] = useState(-1);
+  const [runState, setRunState] = useState<RunStateView>("idle");
+  const [activeRunId, setActiveRunId] = useState<string | null>(null);
+  const [runSummary, setRunSummary] = useState<RunSummary | null>(null);
+  const [runEvents, setRunEvents] = useState<AuditEvent[]>([]);
   const [result, setResult] = useState<HealResult | null>(null);
   const [runError, setRunError] = useState<string | null>(null);
+  const [publishing, setPublishing] = useState(false);
+  const [publishMessage, setPublishMessage] = useState<string | null>(null);
 
-  const tabCount = useMemo(() => (result ? 1 : 0), [result]);
+  const [summaries, setSummaries] = useState<RunSummary[]>([]);
+  const [runsLoading, setRunsLoading] = useState(true);
+  const [runsError, setRunsError] = useState<string | null>(null);
+  const [metrics, setMetrics] = useState<MetricsSnapshot | null>(null);
+  const [metricsLoading, setMetricsLoading] = useState(true);
+  const [integrations, setIntegrations] = useState<IntegrationSnapshot | null>(null);
+  const [online, setOnline] = useState(true);
+
+  const [detailId, setDetailId] = useState<string | null>(null);
+  const [detailRun, setDetailRun] = useState<HealResult | null>(null);
+  const [detailSummary, setDetailSummary] = useState<RunSummary | null>(null);
+  const [detailEvents, setDetailEvents] = useState<AuditEvent[]>([]);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [detailError, setDetailError] = useState<string | null>(null);
+
+  const pollRef = useRef<number | null>(null);
+
+  const activeStep = runSummary ? STEP_FOR_STATE[runSummary.state] : 0;
+  const healBusy = runState === "running";
+
+  const refreshIndex = useCallback(async () => {
+    setRunsLoading(true);
+    try {
+      const [runsPayload, metricsPayload, healthPayload] = await Promise.all([
+        getJson<{ runs: RunSummary[] }>("/api/runs?limit=25"),
+        getJson<{ metrics: MetricsSnapshot }>("/api/metrics"),
+        fetch("/api/health", { cache: "no-store" }).then((response) => response.json()) as Promise<{ status: string }>,
+      ]);
+      setSummaries(runsPayload.runs);
+      setMetrics(metricsPayload.metrics);
+      setOnline(healthPayload.status === "healthy");
+      setRunsError(null);
+    } catch (error) {
+      setRunsError(error instanceof Error ? error.message : "Failed to load runs");
+      setOnline(false);
+    } finally {
+      setRunsLoading(false);
+      setMetricsLoading(false);
+    }
+  }, []);
+
+  // Initial load uses promise callbacks so no state is set synchronously
+  // inside the effect body.
+  useEffect(() => {
+    let cancelled = false;
+    getJson<{ runs: RunSummary[] }>("/api/runs?limit=25")
+      .then((payload) => {
+        if (!cancelled) {
+          setSummaries(payload.runs);
+          setRunsError(null);
+        }
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          setRunsError(error instanceof Error ? error.message : "Failed to load runs");
+          setOnline(false);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setRunsLoading(false);
+      });
+    getJson<{ metrics: MetricsSnapshot }>("/api/metrics")
+      .then((payload) => {
+        if (!cancelled) setMetrics(payload.metrics);
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (!cancelled) setMetricsLoading(false);
+      });
+    getJson<{ integrations: IntegrationSnapshot }>("/api/integrations")
+      .then((payload) => {
+        if (!cancelled) setIntegrations(payload.integrations);
+      })
+      .catch(() => undefined);
+    fetch("/api/health", { cache: "no-store" })
+      .then((response) => response.json() as Promise<{ status: string }>)
+      .then((payload) => {
+        if (!cancelled) setOnline(payload.status === "healthy");
+      })
+      .catch(() => {
+        if (!cancelled) setOnline(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (pollRef.current) window.clearInterval(pollRef.current);
+    };
+  }, []);
+
+  const pollRun = useCallback(async (runId: string) => {
+    try {
+      const payload = await getJson<{ summary: RunSummary | null; events: AuditEvent[]; result: HealResult | null }>(
+        `/api/runs/${runId}/progress`,
+      );
+      setRunSummary(payload.summary);
+      setRunEvents(payload.events);
+      if (payload.result) setResult(payload.result);
+      if (payload.summary && isTerminal(payload.summary.state)) {
+        if (pollRef.current) {
+          window.clearInterval(pollRef.current);
+          pollRef.current = null;
+        }
+        setRunState("complete");
+        setActivePage("incident");
+        void refreshIndex();
+        await getJson<{ run: HealResult | null }>(`/api/runs/${runId}`)
+          .then((detail) => {
+            if (detail.run) {
+              setResult(detail.run);
+              setPublishMessage(
+                detail.run.delivery?.github === "not-configured"
+                  ? "Draft delivery is unconfigured. Set GITHUB_TOKEN, GITHUB_OWNER and GITHUB_REPO to publish."
+                  : null,
+              );
+            }
+          })
+          .catch(() => undefined);
+      }
+    } catch (error) {
+      if (pollRef.current) {
+        window.clearInterval(pollRef.current);
+        pollRef.current = null;
+      }
+      setRunError(error instanceof Error ? error.message : "Progress polling failed");
+      setRunState("error");
+    }
+  }, [refreshIndex]);
+
+  const runHealer = useCallback(async () => {
+    setActivePage("incident");
+    setRunState("running");
+    setRunError(null);
+    setPublishMessage(null);
+    setResult(null);
+    setRunEvents([]);
+    setRunSummary(null);
+
+    try {
+      const response = await fetch("/api/runs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode: "demo" }),
+      });
+      const payload = (await response.json()) as { ok: boolean; runId?: string; error?: string };
+      if (!response.ok || !payload.runId) throw new Error(payload.error ?? "The healer did not start a run");
+
+      setActiveRunId(payload.runId);
+      await pollRun(payload.runId);
+      pollRef.current = window.setInterval(() => void pollRun(payload.runId!), 700);
+    } catch (error) {
+      setRunError(error instanceof Error ? error.message : "Healing run failed");
+      setRunState("error");
+    }
+  }, [pollRun]);
+
+  const cancelRun = useCallback(async () => {
+    if (!activeRunId) return;
+    try {
+      await fetch(`/api/runs/${activeRunId}/cancel`, { method: "POST" });
+      await pollRun(activeRunId);
+    } catch {
+      setRunError("Cancellation request failed");
+    }
+  }, [activeRunId, pollRun]);
+
+  const publishRun = useCallback(async () => {
+    const id = result?.id ?? runSummary?.id;
+    if (!id) return;
+    if (!window.confirm("Publish a draft pull request for this verified repair? TraceHealer never merges.")) return;
+    setPublishing(true);
+    setPublishMessage(null);
+    try {
+      const response = await fetch(`/api/runs/${id}/publish`, { method: "POST" });
+      const payload = (await response.json()) as { ok: boolean; run?: HealResult; error?: string; alreadyPublished?: boolean };
+      if (!response.ok || !payload.ok) throw new Error(payload.error ?? "Publication failed");
+      if (payload.run) setResult(payload.run);
+      setPublishMessage(payload.alreadyPublished ? "This run was already published." : "Draft pull request published for review.");
+    } catch (error) {
+      setPublishMessage(error instanceof Error ? error.message : "Publication failed");
+    } finally {
+      setPublishing(false);
+    }
+  }, [result, runSummary]);
+
+  const openRun = useCallback(async (id: string) => {
+    if (!id) return;
+    setDetailId(id);
+    setActivePage("run");
+    setDetailLoading(true);
+    setDetailError(null);
+    try {
+      const payload = await getJson<{ run: HealResult | null; summary: RunSummary | null; events: AuditEvent[] }>(
+        `/api/runs/${id}`,
+      );
+      setDetailRun(payload.run);
+      setDetailSummary(payload.summary);
+      setDetailEvents(payload.events);
+    } catch (error) {
+      setDetailError(error instanceof Error ? error.message : "Failed to load run");
+    } finally {
+      setDetailLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -773,42 +1306,7 @@ export function TraceHealerApp() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [runState]);
-
-  async function runHealer() {
-    setActivePage("incident");
-    setRunState("running");
-    setRunError(null);
-    setResult(null);
-    setActiveStep(0);
-
-    try {
-      const responsePromise = fetch("/api/heal", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mode: "demo" }),
-      });
-
-      for (let step = 0; step < workflow.length; step += 1) {
-        setActiveStep(step);
-        await wait(step === 0 ? 380 : step === 1 ? 620 : step === 2 ? 700 : 540);
-      }
-
-      const response = await responsePromise;
-      const payload = (await response.json()) as { ok: boolean; result?: HealResult; error?: string };
-      if (!response.ok || !payload.result) throw new Error(payload.error ?? "The healer did not return a result");
-
-      setResult(payload.result);
-      setActiveStep(workflow.length);
-      setRunState("complete");
-      await wait(220);
-      document.getElementById("verification")?.scrollIntoView({ behavior: "smooth", block: "start" });
-    } catch (error) {
-      setRunError(error instanceof Error ? error.message : "Healing run failed");
-      setRunState("error");
-      setActiveStep(-1);
-    }
-  }
+  }, [runState, runHealer]);
 
   function reviewPatch() {
     setActivePage("incident");
@@ -816,87 +1314,131 @@ export function TraceHealerApp() {
     document.getElementById("incident-workbench")?.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
+  const openIncidentsCount = summaries.filter((run) => run.state !== "healed").length;
+
   return (
     <div className="app-shell">
       <Sidebar
         open={sidebarOpen}
         activePage={activePage}
+        openIncidents={openIncidentsCount}
+        systemOnline={online}
         onClose={() => setSidebarOpen(false)}
         onNavigate={setActivePage}
       />
       <div className="app-main">
         <Topbar page={activePage} onMenu={() => setSidebarOpen(true)} />
+        <StatusRegion>
+          {online ? "Service online." : "Service offline."} {runSummary ? `Run state: ${STATE_LABELS[runSummary.state]}.` : ""}
+        </StatusRegion>
         <main className="content">
-          {activePage === "incident" ? <>
-          <section className="incident-header">
-            <div className="incident-title-row">
-              <div>
-                <div className="meta-row">
-                  <span className="severity-pill"><span /> CRITICAL</span>
-                  <span>First seen {DEMO_INCIDENT.firstSeen}</span>
-                  <span className="meta-dot">·</span>
-                  <span>37 affected runs</span>
-                </div>
-                <h1>{DEMO_INCIDENT.title}</h1>
-                <p>{DEMO_INCIDENT.summary}</p>
-              </div>
-              <div className="header-actions">
-                <a className="secondary-button" href="#trace"><ExternalLink size={15} /> Open trace</a>
-                <button className="primary-button" onClick={() => void runHealer()} disabled={runState === "running"}>
-                  {runState === "complete" ? <><RotateCcw size={16} /> Run again</> : runState === "running" ? <><LoaderCircle className="spin" size={16} /> Healing...</> : <><Sparkles size={16} /> Heal incident</>}
-                </button>
-              </div>
+          {!online && activePage !== "run" ? (
+            <div className="error-banner" role="alert">
+              <AlertTriangle size={16} /> The TraceHealer service is unreachable. Start the server and retry.
             </div>
-            <div className="context-bar">
-              <div><span>AGENT</span><strong><span className="mini-agent"><Bot size={12} /></span> support-agent</strong></div>
-              <div><span>ENVIRONMENT</span><strong><span className="env-dot" /> Production</strong></div>
-              <div><span>REPOSITORY</span><strong><GitHubIcon size={13} /> northstar/support-agent</strong></div>
-              <div><span>COMMIT</span><strong><GitBranch size={13} /> 8d2f19c</strong></div>
-              <div><span>DETECTED BY</span><strong><span className="neatlogs-mark">n</span> neatlogs</strong></div>
-            </div>
-          </section>
+          ) : null}
 
-          <ValueStrip />
-
-          <section className="workbench" id="incident-workbench">
-            <div className="workbench-main">
-              <div className="tabs">
-                <button className={tab === "trace" ? "active" : ""} onClick={() => setTab("trace")}><Activity size={15} /> Trace</button>
-                <button className={tab === "diagnosis" ? "active" : ""} onClick={() => setTab("diagnosis")}><Bot size={15} /> Diagnosis <span>96%</span></button>
-                <button className={tab === "patch" ? "active" : ""} onClick={() => setTab("patch")}><Code2 size={15} /> Patch {tabCount ? <span className="tab-ready">READY</span> : null}</button>
-              </div>
-              <div className="tab-content">
-                {tab === "trace" ? <TraceWaterfall selected={selectedSpan} onSelect={setSelectedSpan} /> : null}
-                {tab === "diagnosis" ? <DiagnosisView result={result} /> : null}
-                {tab === "patch" ? <PatchView result={result} onHeal={() => void runHealer()} /> : null}
-              </div>
-            </div>
-            <HealingAgent
-              state={runState}
-              activeStep={activeStep}
-              result={result}
-              error={runError}
-              onRun={() => void runHealer()}
-              onReview={reviewPatch}
+          {activePage === "run" ? (
+            <RunDetail
+              run={detailRun}
+              summary={detailSummary}
+              events={detailEvents}
+              loading={detailLoading}
+              error={detailError}
+              onOpenRun={openRun}
             />
-          </section>
+          ) : activePage === "incident" ? (
+            <>
+              <section className="incident-header">
+                <div className="incident-title-row">
+                  <div>
+                    <div className="meta-row">
+                      <span className="severity-pill"><span /> CRITICAL</span>
+                      <span className="demo-flag">SEEDED DEMO TRACE</span>
+                      <span>First seen {DEMO_INCIDENT.firstSeen}</span>
+                      <span className="meta-dot" aria-hidden="true">·</span>
+                      <span>{DEMO_INCIDENT.affectedRuns} affected runs</span>
+                    </div>
+                    <h1>{DEMO_INCIDENT.title}</h1>
+                    <p>{DEMO_INCIDENT.summary}</p>
+                  </div>
+                  <div className="header-actions">
+                    <a className="secondary-button" href="#trace"><ExternalLink size={15} /> Open trace</a>
+                    <button className="primary-button" onClick={() => void runHealer()} disabled={runState === "running"}>
+                      {runState === "complete" ? <><RotateCcw size={16} /> Run again</> : runState === "running" ? <><LoaderCircle className="spin" size={16} /> Healing…</> : <><Sparkles size={16} /> Heal incident</>}
+                    </button>
+                  </div>
+                </div>
+                <div className="context-bar">
+                  <div><span>AGENT</span><strong><span className="mini-agent" aria-hidden="true"><Bot size={12} /></span> support-agent</strong></div>
+                  <div><span>ENVIRONMENT</span><strong><span className="env-dot" aria-hidden="true" /> Production</strong></div>
+                  <div><span>REPOSITORY</span><strong><GitHubIcon size={13} /> {DEMO_TRACE.repository}</strong></div>
+                  <div><span>COMMIT</span><strong><GitBranch size={13} /> {DEMO_TRACE.commit}</strong></div>
+                  <div><span>DETECTED BY</span><strong><span className="neatlogs-mark" aria-hidden="true">n</span> neatlogs</strong></div>
+                </div>
+              </section>
 
-          {result ? <div id="verification"><ProofPanel result={result} /></div> : (
-            <section className="pre-proof">
-              <div><ShieldCheck size={19} /><span><strong>Evidence, not promises.</strong> Every fix is replayed against the exact failed input before review.</span></div>
-              <div className="integration-chain">
-                <span><span className="neatlogs-mark">n</span> neatlogs</span><i />
-                <span><SquareTerminal size={14} /> TraceHealer</span><i />
-                <span><GitHubIcon size={14} /> GitHub</span>
-              </div>
-            </section>
-          )}
-          </> : (
+              <MetricsStrip metrics={metrics} loading={metricsLoading} />
+
+              <section className="workbench" id="incident-workbench">
+                <div className="workbench-main">
+                  <div className="tabs" role="tablist" aria-label="Incident views">
+                    <button role="tab" aria-selected={tab === "trace"} className={tab === "trace" ? "active" : ""} onClick={() => setTab("trace")}><Activity size={15} /> Trace</button>
+                    <button role="tab" aria-selected={tab === "diagnosis"} className={tab === "diagnosis" ? "active" : ""} onClick={() => setTab("diagnosis")}><Bot size={15} /> Diagnosis {result ? <span>{Math.round(result.diagnosis.confidence * 100)}%</span> : null}</button>
+                    <button role="tab" aria-selected={tab === "patch"} className={tab === "patch" ? "active" : ""} onClick={() => setTab("patch")}><Code2 size={15} /> Patch {result ? <span className="tab-ready">READY</span> : null}</button>
+                  </div>
+                  <div className="tab-content">
+                    {tab === "trace" ? <TraceWaterfall selected={selectedSpan} onSelect={setSelectedSpan} /> : null}
+                    {tab === "diagnosis" ? <DiagnosisView result={result} loading={runState === "running" && !result} /> : null}
+                    {tab === "patch" ? <PatchView result={result} loading={runState === "running" && !result} onHeal={() => void runHealer()} canRun={runState !== "running"} /> : null}
+                  </div>
+                </div>
+                <HealingAgent
+                  state={runState}
+                  activeStep={activeStep}
+                  result={result}
+                  error={runError}
+                  canRun={runState !== "running"}
+                  onRun={() => void runHealer()}
+                  onReview={reviewPatch}
+                  onCancel={() => void cancelRun()}
+                />
+              </section>
+
+              {runEvents.length && runState === "running" ? (
+                <section className="management-card live-timeline">
+                  <span className="section-label">Live server progress</span>
+                  <RunTimeline events={runEvents} summary={runSummary} />
+                </section>
+              ) : null}
+
+              {result ? (
+                <div id="verification"><ProofPanel result={result} onPublish={() => void publishRun()} publishing={publishing} publishMessage={publishMessage} /></div>
+              ) : (
+                <section className="pre-proof">
+                  <div><ShieldCheck size={19} /><span><strong>Evidence, not promises.</strong> Every fix is replayed against the exact failed input before review.</span></div>
+                  <div className="integration-chain">
+                    <span><span className="neatlogs-mark" aria-hidden="true">n</span> neatlogs</span><i aria-hidden="true" />
+                    <span><SquareTerminal size={14} /> TraceHealer</span><i aria-hidden="true" />
+                    <span><GitHubIcon size={14} /> GitHub</span>
+                  </div>
+                </section>
+              )}
+            </>
+          ) : (
             <ManagementPage
               page={activePage}
-              latestResult={result}
+              metrics={metrics}
+              metricsLoading={metricsLoading}
+              integrations={integrations}
+              summaries={summaries}
+              runsLoading={runsLoading}
+              runsError={runsError}
               onOpenIncident={() => setActivePage("incident")}
               onRunHealer={() => void runHealer()}
+              canRun={runState !== "running"}
+              healBusy={healBusy}
+              onOpenRun={(id) => void openRun(id)}
             />
           )}
 
@@ -906,6 +1448,7 @@ export function TraceHealerApp() {
           </footer>
         </main>
       </div>
+      {detailId ? <span className="sr-only">Selected run {detailId}</span> : null}
     </div>
   );
 }

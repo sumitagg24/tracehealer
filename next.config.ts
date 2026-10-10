@@ -1,5 +1,10 @@
 import type { NextConfig } from "next";
 
+// React dev mode relies on eval() for stack reconstruction; production does not.
+const scriptSrc = process.env.NODE_ENV === "production"
+  ? "script-src 'self' 'unsafe-inline'"
+  : "script-src 'self' 'unsafe-inline' 'unsafe-eval'";
+
 const securityHeaders = [
   { key: "X-Content-Type-Options", value: "nosniff" },
   { key: "X-Frame-Options", value: "DENY" },
@@ -11,7 +16,7 @@ const securityHeaders = [
     key: "Content-Security-Policy",
     value: [
       "default-src 'self'",
-      "script-src 'self' 'unsafe-inline'",
+      scriptSrc,
       "style-src 'self' 'unsafe-inline'",
       "img-src 'self' data: blob:",
       "font-src 'self' data:",
@@ -30,6 +35,9 @@ const nextConfig: NextConfig = {
   poweredByHeader: false,
   reactStrictMode: true,
   output: "standalone",
+  // Allow loopback hosts to reach dev-only resources (HMR) when the server
+  // binds 0.0.0.0 and is opened via 127.0.0.1.
+  allowedDevOrigins: ["127.0.0.1", "localhost", "0.0.0.0"],
   outputFileTracingIncludes: {
     "/api/heal": fixtureTrace,
     "/api/runs": fixtureTrace,
