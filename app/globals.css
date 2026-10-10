@@ -706,6 +706,23 @@
   margin-bottom: 16px;
 }
 
+.auth-gate {
+  display: flex; align-items: flex-start; gap: 12px;
+  border: 1px solid rgba(255, 189, 102, 0.4);
+  background: rgba(255, 189, 102, 0.08);
+  color: #ffe8c7;
+  border-radius: 12px;
+  padding: 14px 16px;
+  margin-bottom: 16px;
+}
+.auth-gate svg { flex-shrink: 0; margin-top: 2px; color: var(--amber); }
+.auth-gate strong { display: block; font-size: 14px; margin-bottom: 4px; }
+.auth-gate p { margin: 0 0 4px; font-size: 13px; }
+.auth-gate small { color: var(--muted); font-size: 12px; }
+@media (prefers-reduced-motion: no-preference) {
+  .auth-gate { transition: border-color 0.2s ease; }
+}
+
 .demo-flag {
   font-size: 10px; font-weight: 700; letter-spacing: 0.08em;
   color: var(--amber);

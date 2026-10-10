@@ -24,6 +24,7 @@ import {
   RotateCcw,
   Search,
   Settings2,
+  ShieldAlert,
   ShieldCheck,
   Sparkles,
   SquareTerminal,
@@ -161,6 +162,43 @@ function StatusRegion({ children }: { children: React.ReactNode }) {
     <div className="sr-status" role="status" aria-live="polite">
       {children}
     </div>
+  );
+}
+
+/**
+ * Authentication surface shown when the server rejects the session: never
+ * authenticated (401), session expired mid-use (401 after a prior success), or
+ * the role lacks the capability (403). Rendered with role=alert so screen
+ * readers announce it.
+ */
+function AuthGate({ state }: { state: "unauthenticated" | "expired" | "forbidden" }) {
+  const copy = {
+    unauthenticated: {
+      title: "Sign in required",
+      body: "This control center requires an authenticated session. Ask your administrator for access, or start the service in local development mode.",
+      recovery: "Sign-in is provided by your deployment's identity layer (TRACEHEALER_AUTH_MODE=session). Reload after signing in.",
+    },
+    expired: {
+      title: "Session expired",
+      body: "Your session token was rejected — sign in again to continue. Data was not modified while you were away.",
+      recovery: "Reload this page after signing in; your workspace state is preserved on the server.",
+    },
+    forbidden: {
+      title: "Not authorized for this action",
+      body: "Your role can read runs but cannot create, cancel, publish, or change policy. Request operator access from your workspace admin.",
+      recovery: "Read-only views remain available below.",
+    },
+  } as const;
+  const message = copy[state];
+  return (
+    <section className="auth-gate" role="alert" aria-live="assertive">
+      <ShieldAlert size={20} aria-hidden="true" />
+      <div>
+        <strong>{message.title}</strong>
+        <p>{message.body}</p>
+        <small>{message.recovery}</small>
+      </div>
+    </section>
   );
 }
 
@@ -1070,8 +1108,17 @@ function ManagementPage({
 
 async function getJson<T>(url: string): Promise<T> {
   const response = await fetch(url, { cache: "no-store" });
-  const payload = (await response.json()) as T & { ok?: boolean; error?: string };
-  if (!response.ok || payload.ok === false) throw new Error(payload.error ?? `Request failed (${response.status})`);
+  const payload = (await response.json()) as T & { ok?: boolean; error?: string; code?: string };
+  if (!response.ok || payload.ok === false) {
+    const error = new Error(payload.error ?? `Request failed (${response.status})`) as Error & {
+      status?: number;
+      code?: string;
+    };
+    error.status = response.status;
+    error.code = payload.code;
+    // authentication required (401) and forbidden (403) drive dedicated UI states
+    throw error;
+  }
   return payload as T;
 }
 
@@ -1096,6 +1143,11 @@ export function TraceHealerApp() {
   const [metricsLoading, setMetricsLoading] = useState(true);
   const [integrations, setIntegrations] = useState<IntegrationSnapshot | null>(null);
   const [online, setOnline] = useState(true);
+
+  // Authentication surface: "unauthenticated" before sign-in, "expired" when a
+  // previously valid session times out, "forbidden" when the role is too low,
+  // null when authorized.
+  const [authState, setAuthState] = useState<null | "unauthenticated" | "expired" | "forbidden">(null);
 
   const [detailId, setDetailId] = useState<string | null>(null);
   const [detailRun, setDetailRun] = useState<HealResult | null>(null);
@@ -1122,6 +1174,9 @@ export function TraceHealerApp() {
       setOnline(healthPayload.status === "healthy");
       setRunsError(null);
     } catch (error) {
+      const status = (error as Error & { status?: number }).status;
+      if (status === 401) setAuthState((current) => (current === null ? "unauthenticated" : "expired"));
+      else if (status === 403) setAuthState("forbidden");
       setRunsError(error instanceof Error ? error.message : "Failed to load runs");
       setOnline(false);
     } finally {
@@ -1337,6 +1392,8 @@ export function TraceHealerApp() {
               <AlertTriangle size={16} /> The TraceHealer service is unreachable. Start the server and retry.
             </div>
           ) : null}
+
+          {authState ? <AuthGate state={authState} /> : null}
 
           {activePage === "run" ? (
             <RunDetail
