@@ -1,12 +1,14 @@
 import { NextResponse } from "next/server";
 import { jsonError, noStore } from "@/lib/http";
 import { getHealingRun, getRunSummary, readRunEvents } from "@/lib/store";
+import { authorize } from "@/lib/auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET(_request: Request, context: { params: Promise<{ id: string }> }) {
   try {
+    authorize(_request, "run:read");
     const { id } = await context.params;
     const [run, summary, events] = await Promise.all([getHealingRun(id), getRunSummary(id), readRunEvents(id)]);
     if (!run && !summary) {

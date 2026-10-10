@@ -17,7 +17,10 @@ The included neatHack scenario is fully executable: Order API v3 moves a custome
 7. **Persist** — the run, logs, metrics, context, commit, delivery state, and artifact paths are atomically recorded.
 8. **Deliver** — when configured, TraceHealer exports the verified run, sends Slack evidence, and creates a **draft** GitHub PR. It never merges.
 
-No secret is required for steps 1–7.
+No secret is required for steps 1–7. Authentication defaults to
+`TRACEHEALER_AUTH_MODE=local`, which is development-only and refuses to serve a
+production runtime without an explicit acknowledgement. See
+[`docs/OPERATIONS.md`](docs/OPERATIONS.md) for production session mode.
 
 ## Features
 
@@ -35,6 +38,7 @@ No secret is required for steps 1–7.
 - Automatic or manual draft-PR delivery after verification
 - Optional after-trace export and Slack notifications
 - Secret-safe integration readiness endpoint
+- Authenticated, tenant-scoped API: development-only local mode plus HMAC-signed session cookies, `viewer`/`operator`/`admin` roles, and cross-tenant ID protection
 - Docker production image, persistent volume, healthcheck, CI, security headers, tests, and responsive UI
 
 ## Quick start
@@ -215,6 +219,9 @@ All variables are optional for the complete local flow.
 
 | Variable | Purpose |
 |---|---|
+| `TRACEHEALER_AUTH_MODE` | `local` (development only) or `session` (production) |
+| `TRACEHEALER_SESSION_SECRET` | HMAC key for session cookies; required by `session` mode |
+| `TRACEHEALER_LOCAL_AUTH_ACK` | Must be `true` for `local` mode to serve a production runtime |
 | `TRACEHEALER_DATA_DIR` | Persistent run/workspace/artifact root |
 | `NEATLOGS_WEBHOOK_SECRET` | Verify failed-trace intake |
 | `NEATLOGS_EXPORT_URL` / `NEATLOGS_API_KEY` | Export verified after-run evidence |
@@ -242,6 +249,10 @@ The exact neatlogs ingest URL is configurable rather than invented. Point it at 
 5. GitHub publication creates a draft only; TraceHealer never merges.
 6. Unsupported traces remain `needs-review` and receive no fabricated after metrics.
 7. Tokens, URLs, raw credentials, and secrets never appear in status responses.
+8. Every run, artifact, and control action is tenant-scoped and role-checked;
+   `local` authentication is development-only and fails closed in production.
+9. A cross-tenant identifier returns `404`, so runs and artifacts cannot be
+   enumerated across tenants.
 
 For untrusted arbitrary customer repositories, run each workspace in a disposable container or microVM as described in the operations guide.
 

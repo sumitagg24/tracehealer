@@ -15,6 +15,9 @@ dist/
 .env.*.local
 .tracehealer-data/
 
+# agent/tooling state
+.freebuff/
+
 # tests
 coverage/
 

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { jsonError, noStore } from "@/lib/http";
 import { getRunProgress } from "@/lib/runs";
+import { authorize } from "@/lib/auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -8,6 +9,7 @@ export const dynamic = "force-dynamic";
 /** Server-owned progress: state, audit events, and the finished result if any. */
 export async function GET(_request: Request, context: { params: Promise<{ id: string }> }) {
   try {
+    authorize(_request, "run:read");
     const { id } = await context.params;
     const progress = await getRunProgress(id);
     if (!progress) {

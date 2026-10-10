@@ -89,6 +89,42 @@ The image includes Node and git, runs as an unprivileged user, exposes port 3000
 A malformed numeric value makes `/api/ready` fail safely rather than starting
 with a partial configuration.
 
+## Authentication and tenancy
+
+| Variable | Purpose |
+|---|---|
+| `TRACEHEALER_AUTH_MODE` | `local` (default, development only) or `session` (production) |
+| `TRACEHEALER_SESSION_SECRET` | HMAC key for session cookies; required by `session` mode |
+| `TRACEHEALER_LOCAL_AUTH_ACK` | Must be `true` for `local` mode to serve under `NODE_ENV=production` |
+| `TRACEHEALER_TENANT_ID`, `TRACEHEALER_WORKSPACE_ID` | Tenant/workspace assigned to local-mode requests |
+
+`local` mode is development-only. It serves a synthetic `admin` principal so the
+zero-secret demo works, and it fails closed with `503 unconfigured` when
+`NODE_ENV=production` unless `TRACEHEALER_LOCAL_AUTH_ACK=true`. Never enable that
+acknowledgement for a deployment that is reachable by untrusted users.
+
+`session` mode fails closed with `503 unconfigured` when
+`TRACEHEALER_SESSION_SECRET` is missing, and returns `401 unauthorized` for a
+missing, tampered, or expired `tracehealer_session` cookie. The cookie is
+HTTP-only, `SameSite=Lax`, and `Secure` in production.
+
+Roles are least-privilege: `viewer` can read runs and artifacts; `operator` can
+also create, cancel, retry, and publish; only `admin` can change administrator
+policy or integration configuration. Every resource read is scoped to the
+caller's tenant, and a cross-tenant identifier returns `404`, not `403`, so IDs
+cannot be enumerated.
+
+Cookie-authenticated mutations are origin-checked before any side effect, so a
+foreign `Origin` receives `403 invalid-origin`. Provider webhooks use their own
+HMAC signature and never accept the browser session cookie.
+
+Sessions are minted by the deployment's identity layer with
+`issueSessionToken(session, secret)` from `lib/auth.ts` and set on the
+`tracehealer_session` cookie. There is no built-in password login and no
+server-side revocation list yet, so a leaked token remains valid until its
+`expiresAt`; keep the TTL short and rotate `TRACEHEALER_SESSION_SECRET` to
+invalidate every outstanding session.
+
 ## Webhook signing
 
 When `NEATLOGS_WEBHOOK_SECRET` is configured, TraceHealer requires:
@@ -119,6 +155,8 @@ The included filesystem store uses atomic rename and is appropriate for a single
 
 ## Production checklist
 
+- [ ] Set `TRACEHEALER_AUTH_MODE=session` and a 32-byte `TRACEHEALER_SESSION_SECRET`.
+- [ ] Leave `TRACEHEALER_LOCAL_AUTH_ACK=false` so local mode cannot serve production traffic.
 - [ ] Put the service behind authenticated ingress.
 - [ ] Configure a random webhook secret.
 - [ ] Use a GitHub App installation token rather than a PAT.

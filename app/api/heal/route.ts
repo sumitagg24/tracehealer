@@ -14,6 +14,7 @@ import {
   readBoundedText,
 } from "@/lib/http";
 import { getHealingRun, findRunByIdempotencyKey } from "@/lib/store";
+import { authorize } from "@/lib/auth";
 
 export const runtime = "nodejs";
 
@@ -25,6 +26,7 @@ export const runtime = "nodejs";
 export async function POST(request: Request) {
   const correlation = correlationId(request);
   try {
+    authorize(request, "run:create");
     assertSameOrigin(request);
     enforceRateLimit(`heal:${clientIp(request)}`);
     assertJsonContentType(request);

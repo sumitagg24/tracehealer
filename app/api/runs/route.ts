@@ -14,6 +14,7 @@ import {
 import { startHealingRun } from "@/lib/runs";
 import { healRequestSchema } from "@/lib/schema";
 import { listRunSummaries } from "@/lib/store";
+import { authorize } from "@/lib/auth";
 
 export const runtime = "nodejs";
 
@@ -21,14 +22,19 @@ const API_VERSION = "2026-10-01";
 
 /** Paginated, secret-free run index for the audit log and control center. */
 export async function GET(request: Request) {
-  const { searchParams } = new URL(request.url);
-  const requestedLimit = Number(searchParams.get("limit") ?? 25);
-  const limit = Number.isFinite(requestedLimit) ? Math.min(Math.max(requestedLimit, 1), 100) : 25;
-  const summaries = await listRunSummaries(limit);
-  return NextResponse.json(
-    { ok: true, apiVersion: API_VERSION, runs: summaries, count: summaries.length },
-    { headers: noStore() },
-  );
+  try {
+    authorize(request, "run:read");
+    const { searchParams } = new URL(request.url);
+    const requestedLimit = Number(searchParams.get("limit") ?? 25);
+    const limit = Number.isFinite(requestedLimit) ? Math.min(Math.max(requestedLimit, 1), 100) : 25;
+    const summaries = await listRunSummaries(limit);
+    return NextResponse.json(
+      { ok: true, apiVersion: API_VERSION, runs: summaries, count: summaries.length },
+      { headers: noStore() },
+    );
+  } catch (error) {
+    return jsonError(error, noStore());
+  }
 }
 
 /**
@@ -38,6 +44,7 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
   const correlation = correlationId(request);
   try {
+    authorize(request, "run:create");
     assertSameOrigin(request);
     enforceRateLimit(`runs:${clientIp(request)}`);
     assertJsonContentType(request);

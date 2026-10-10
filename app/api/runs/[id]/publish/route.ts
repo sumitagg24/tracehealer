@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { assertSameOrigin, enforceRateLimit, jsonError, noStore } from "@/lib/http";
+import { authorize } from "@/lib/auth";
 import { publishDraftPullRequest } from "@/lib/github";
 import { getHealingRun, readArtifactRelative, saveHealingRun } from "@/lib/store";
 import type { HealResult } from "@/lib/types";
@@ -32,6 +33,7 @@ Local sandbox commit: \`${run.artifacts?.localCommit ?? "unavailable"}\`
 export async function POST(request: Request, context: { params: Promise<{ id: string }> }) {
   try {
     assertSameOrigin(request);
+    authorize(request, "run:publish");
     enforceRateLimit(`publish:${(await context.params).id}`, 10, 60_000);
     const { id } = await context.params;
     const run = await getHealingRun(id);

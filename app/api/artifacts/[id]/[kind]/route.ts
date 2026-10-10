@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { jsonError, noStore } from "@/lib/http";
 import { getHealingRun, readArtifact, type ArtifactKind } from "@/lib/store";
+import { authorize } from "@/lib/auth";
 
 export const runtime = "nodejs";
 
@@ -8,6 +9,7 @@ const KINDS: ArtifactKind[] = ["patch", "report"];
 
 export async function GET(_request: Request, context: { params: Promise<{ id: string; kind: string }> }) {
   try {
+    authorize(_request, "run:read");
     const { id, kind } = await context.params;
     if (!KINDS.includes(kind as ArtifactKind)) {
       return NextResponse.json({ ok: false, code: "not-found", error: "Unknown artifact" }, { status: 404 });

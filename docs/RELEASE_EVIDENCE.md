@@ -115,6 +115,74 @@ The `Dockerfile` and `compose.yaml` are unchanged and CI builds the app, but
 Docker was **not** available in this environment, so container build, non-root
 runtime, healthcheck, and restart/persistence were not executed here.
 
+## Prompt 2 — authentication and tenant authorization
+
+Contract tests (`lib/auth.test.ts`, 11 cases):
+
+```
+local mode grants an admin principal with every capability
+production runtime + local mode without acknowledgement -> 503 unconfigured
+production runtime + TRACEHEALER_LOCAL_AUTH_ACK=true -> allowed
+session mode without TRACEHEALER_SESSION_SECRET -> 503 unconfigured
+session mode without a cookie -> 401 unauthorized
+operator cookie: run:create allowed, policy:write forbidden (403)
+viewer cookie: run:read allowed, run:create forbidden (403)
+expired token -> 401 unauthorized
+tampered signature -> rejected
+cross-tenant tenantId -> 404 not-found
+cookie-authenticated mutation with Origin: https://evil.example -> 403 invalid-origin
+```
+
+HTTP evidence. The standalone production build was started with
+`TRACEHEALER_AUTH_MODE=session`, a `TRACEHEALER_SESSION_SECRET`, and a throwaway
+`TRACEHEALER_DATA_DIR`. Session cookies were minted with the same HMAC scheme as
+`lib/auth.ts` and the responses below are copied from that server:
+
+```
+GET  /api/runs  (no cookie)                        -> 401 {"code":"unauthorized","error":"Authentication required"}
+GET  /api/runs  (expired cookie)                   -> 401 {"code":"unauthorized","error":"Authentication required"}
+GET  /api/runs  (operator cookie)                  -> 200 {"ok":true,"runs":[],"count":0}
+GET  /api/runs  (viewer cookie)                    -> 200 {"ok":true,"runs":[],"count":0}
+POST /api/runs  (viewer cookie, mode demo)         -> 403 {"code":"forbidden","error":"Your role does not permit this action"}
+POST /api/runs  (operator cookie, foreign Origin)  -> 403 {"code":"invalid-origin","error":"Cross-origin request rejected"}
+```
+
+Same server, operator cookie, Prompt 1 request contract over real HTTP:
+
+```
+POST /api/runs {}                                  -> 400 {"code":"invalid-input","error":"Invalid run payload"}
+POST /api/runs {oops                               -> 400 {"code":"invalid-input","error":"Request body is not valid JSON"}
+POST /api/runs {"mode":"connected","trace":{"bad":true}} -> 400 {"code":"invalid-input","error":"Invalid run payload"}
+POST /api/runs Content-Type: text/plain            -> 400 {"code":"invalid-input","error":"Expected an application/json request body"}
+POST /api/runs 600 kB body                         -> 413 {"code":"payload-too-large","error":"Request body exceeds the size limit"}
+POST /api/runs {"mode":"demo"}                     -> 202 {"runId":"heal_5c6c3562","state":"queued"}
+```
+
+That 202 run finished for real through the authenticated API:
+
+```
+GET /api/runs/heal_5c6c3562/progress
+  result.state              healed
+  verification.passed       true
+  checks                    4/4 passed
+  beforeTestExitCode        1   (TAP: # fail 3)
+  afterTestExitCode         0   (TAP: # pass 4)
+  artifacts.localCommit     2f344d0
+  delivery                  github/neatlogs/slack = not-configured
+```
+
+Readiness alias equivalence, measured on the same server:
+
+```
+GET /api/ready     -> HTTP/1.1 200 | Cache-Control: no-store | content-type: application/json
+GET /api/readiness -> HTTP/1.1 200 | Cache-Control: no-store | content-type: application/json
+bodies identical after removing the volatile timestamp field: true
+```
+
+Not claimed: no external identity provider (OIDC/SAML) was configured or called,
+so no live third-party login is verified. The provider boundary, the local
+principal, and HMAC session validation are implemented and tested.
+
 ## External blockers (not claimed as verified)
 
 - No live **neatlogs** ingest/export contract (no endpoint or key).

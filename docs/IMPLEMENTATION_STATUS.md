@@ -37,11 +37,50 @@ remains unverified or externally blocked. Statuses are truthful: a capability is
 | Repository context (local graph) | `lib/context.ts` scans the target fixture for files/symbols/tests | pipeline test | Only JS/TS-shaped files | verified |
 | Real remote repository checkout | Not implemented; the target is the local fixture | — | Needs clone/commit pinning + container isolation | blocked (design) |
 | Untrusted-code container boundary | Not implemented; local process provider only | — | Arbitrary third-party code must run in a disposable container | blocked (design) |
-| Multi-tenant authorization | Single-tenant local deployment | — | Needs auth + ownership scoping | blocked (design) |
+| Authentication modes | `lib/auth.ts` resolves every request to a session: `TRACEHEALER_AUTH_MODE=local` (development-only synthetic admin) or `session` (HMAC-signed HTTP-only SameSite cookie) | `lib/auth.test.ts` | No live external identity provider is wired | verified (contract) |
+| Fail-closed production auth | `local` mode refuses to serve when `NODE_ENV=production` unless `TRACEHEALER_LOCAL_AUTH_ACK=true`; `session` mode throws `503 unconfigured` without `TRACEHEALER_SESSION_SECRET` | `lib/auth.test.ts` | None found | verified |
+| Roles and least privilege | `viewer` (read) < `operator` (create/cancel/publish/retry) < `admin` (+ policy/integration writes); enforced per route | `lib/auth.test.ts`, route wiring | None found | verified |
+| Tenant scoping | every run/artifact/progress/cancel/publish operation is scoped to `session.tenantId` | `lib/auth.test.ts` | Single shared filesystem data root | verified |
+| Cross-tenant enumeration | mismatched tenant resolves to `404 not-found`, not `403`, so IDs cannot be probed | `lib/auth.test.ts` | None found | verified |
+| Session lifetime | signed tokens carry `expiresAt`; expired/tampered tokens are rejected as `401` | `lib/auth.test.ts` | No server-side revocation list yet | verified (contract) |
+| CSRF / origin on cookie mutations | `assertSameOrigin` (`403 invalid-origin`) runs on every mutating route before auth side effects | `lib/http.test.ts`, `lib/routes.test.ts` | `TRACEHEALER_TRUSTED_ORIGINS` is optional | verified |
+| Webhook service auth | HMAC service signature stays separate from browser sessions; webhooks never read the session cookie | `lib/webhook.test.ts` | Live neatlogs contract unverified | verified (contract) |
+| Integration secret exposure | `/api/integrations` reports configured/not-configured booleans only; no secret value is ever serialized | `lib/integrations.ts` | None found | verified |
+| Auth UI states | sign-in, workspace selection, unauthorized, expired-session panels | browser a11y tree | No external IdP redirect flow | implemented |
 | GitHub draft delivery | `lib/github.ts` draft-only, idempotent, policy-gated | code review + typed error smoke (503 unconfigured) | No live draft PR (no credentials) | blocked (credentials) |
 | After-trace export / Slack | Configurable adapters, failures isolated from verification | pipeline code path | No live provider (no credentials) | blocked (credentials) |
 | Dodo / AWS / CFO sponsor adapters | Not implemented | — | Requires official docs + contracts | out of scope |
 | Docker packaging | `Dockerfile` + `compose.yaml` present | CI builds the app | Not built/run in this environment (no Docker) | unverified here |
+
+## Prompt 2 — authenticated workspace and tenant authorization
+
+- **Modes.** `TRACEHEALER_AUTH_MODE` selects `local` (default) or `session`.
+  `local` grants a synthetic `admin` principal for the zero-secret demo and is
+  explicitly development-only: in a production runtime it fails closed with
+  `503 unconfigured` unless `TRACEHEALER_LOCAL_AUTH_ACK=true`.
+- **Sessions.** `session` mode requires `TRACEHEALER_SESSION_SECRET` and a
+  valid HMAC-SHA256 token in the `tracehealer_session` cookie. Tokens carry
+  `sessionId`, `tenantId`, `workspaceId`, `userId`, `role`, and `expiresAt`, are
+  compared with `timingSafeEqual`, and are rejected on tamper or expiry.
+- **Authorization.** Every incident, run, progress, artifact, cancellation,
+  publish, retry, metrics, integration, and repository operation resolves a
+  session first and then asserts a capability. `viewer` can read only;
+  `operator` can create/cancel/publish/retry; only `admin` can change policy or
+  integration configuration.
+- **Tenancy.** Resources are scoped to `session.tenantId`. A cross-tenant
+  identifier resolves to `404 not-found` rather than `403`, so run and artifact
+  IDs cannot be enumerated across tenants.
+- **CSRF.** Cookie-authenticated mutations pass `assertSameOrigin` before any
+  side effect, so a foreign `Origin` gets `403 invalid-origin`.
+- **Webhooks.** Provider webhooks keep their own HMAC service authentication and
+  never accept the browser session cookie.
+- **Revocation/expiry.** Expired sessions return `401 unauthorized`; the UI
+  renders sign-in, workspace-selection, unauthorized, and expired-session
+  states. There is no server-side revocation list yet, so a stolen token stays
+  valid until `expiresAt`.
+- **Not claimed:** no external identity provider (OIDC/SAML) was configured or
+  called. The provider boundary and the local test provider are implemented and
+  tested; a live IdP login is unverified.
 
 ## Baseline defects found and fixed (Prompt 1)
 
