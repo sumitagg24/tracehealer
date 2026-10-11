@@ -8,7 +8,9 @@
     "dev": "tauri dev",
     "build": "tauri build",
     "typecheck": "tsc --noEmit",
-    "test": "node --test src/*.test.mjs src-tauri/src/**/*.rs 2>/dev/null || node --test src/*.test.mjs"
+    "test": "node --test src/*.test.mjs",
+    "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml",
+    "icons": "node scripts/generate-icons.mjs"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.0.0",

@@ -1,15 +1,14 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Least-privilege capability for the TraceHealer desktop client: window/tray UI, HTTP directed only at user-configured TraceHealer servers, secure OS-keychain storage, notifications, and tracehealer:// deep links. No shell, no arbitrary filesystem, no process bridge.",
+  "description": "Least-privilege capability for the TraceHealer desktop client: window and tray UI, native notifications, and tracehealer:// deep links. The renderer receives data only through the shell's own commands, so there is no HTTP plugin, no shell, no filesystem access, and no key-value store.",
   "windows": ["main"],
   "permissions": [
     "core:default",
     "core:window:allow-set-title",
     "core:event:default",
-    "core:tray:default",
     "notification:default",
     "deep-link:default",
-    "store:default"
+    "core:tray:default"
   ]
 }

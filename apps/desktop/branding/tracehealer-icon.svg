@@ -1,0 +1,47 @@
+<!--
+  TraceHealer brand mark (original artwork, repository-owned).
+
+  Design: a dark squircle carrying a single "pulse" trace. The traced part of
+  the  signal is muted; from the mid-flank onward the trace is brand lime, which is
+  the product's own accent colour from app/globals.css (the brand token, value
+  #9df268). The mark reads as one bold glyph so it stays legible in a 16-32px
+  tray/taskbar icon, and it is drawn on a transparent canvas so the platform
+  mask decides the final silhouette.
+
+  Status: PRE-RELEASE branding. No third-party artwork is used; this file is
+  the source of truth and `apps/desktop/scripts/generate-icons.mjs` renders it.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-label="TraceHealer">
+  <defs>
+    <linearGradient id="th-panel" x1="0" y1="0" x2="0.35" y2="1">
+      <stop offset="0" stop-color="#16241c"/>
+      <stop offset="0.55" stop-color="#0b100e"/>
+      <stop offset="1" stop-color="#060809"/>
+    </linearGradient>
+    <linearGradient id="th-trace" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#45544a"/>
+      <stop offset="0.44" stop-color="#45544a"/>
+      <stop offset="0.45" stop-color="#9df268"/>
+      <stop offset="1" stop-color="#9df268"/>
+    </linearGradient>
+    <filter id="th-glow" x="-25%" y="-25%" width="150%" height="150%">
+      <feGaussianBlur in="SourceGraphic" stdDeviation="30" result="th-blur"/>
+    </filter>
+  </defs>
+
+  <!-- Squircle window -->
+  <rect x="76" y="76" width="872" height="872" rx="212" fill="url(#th-panel)"/>
+  <rect x="76" y="76" width="872" height="872" rx="212" fill="none" stroke="#9df268" stroke-opacity="0.20" stroke-width="6"/>
+
+  <!-- Soft lime bloom behind the healed half of the trace -->
+  <path d="M 470 340 L 546 704 L 612 548 L 828 548" fill="none" stroke="#9df268" stroke-opacity="0.35" stroke-width="96" stroke-linecap="round" stroke-linejoin="round" filter="url(#th-glow)"/>
+
+  <!-- The trace: muted while it is still broken, lime once it is mended -->
+  <path d="M 196 548 H 400 L 470 340 L 546 704 L 612 548 H 828"
+        fill="none" stroke="url(#th-trace)" stroke-width="94"
+        stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- Mend marker at the point the trace recovers -->
+  <circle cx="470" cy="340" r="58" fill="#eafff2"/>
+  <circle cx="470" cy="340" r="32" fill="#9df268"/>
+</svg>
