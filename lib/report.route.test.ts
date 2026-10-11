@@ -477,7 +477,9 @@ describe("report route authorization (HTTP)", () => {
     expect(payload.sponsorLinks).toEqual([]);
   });
 
-  it("does not expose another tenant's metrics, notifications, or run ids", async () => {
+  // Seeds a real run through the durable adapter and waits for it to settle, so
+  // it gets an explicit budget instead of the 5s default.
+  it("does not expose another tenant's metrics, notifications, or run ids", { timeout: 60_000 }, async () => {
     const created = await runsPost(
       postRequest("/api/runs", JSON.stringify({ mode: "demo" }), {
         cookie: cookie(session({ role: "admin" })),

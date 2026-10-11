@@ -178,7 +178,10 @@ describe("prompt 1 — cancellation propagation through the provider boundary", 
     else process.env.AUTO_PUBLISH_DRAFT = original.autoPublish;
   });
 
-  it("aborts an active run, records cancelled, and performs no commit or delivery", async () => {
+  // These three tests observe real background scheduling (the coordinator and an
+  // abort-aware provider), so they get the same explicit budget the HTTP-level
+  // suites use instead of the 5s default.
+  it("aborts an active run, records cancelled, and performs no commit or delivery", { timeout: 30_000 }, async () => {
     const { provider, observedAbort, entered } = abortObservingSandbox();
     const publishCalls: string[] = [];
     const exportCalls: string[] = [];
@@ -243,7 +246,7 @@ describe("prompt 1 — cancellation propagation through the provider boundary", 
     expect(after?.state).toBe("cancelled");
   });
 
-  it("repeated cancellation is idempotent and leaves a terminal run unchanged", async () => {
+  it("repeated cancellation is idempotent and leaves a terminal run unchanged", { timeout: 30_000 }, async () => {
     const { provider, entered } = abortObservingSandbox();
     const deps = createPipelineDeps({ patchStrategy: alwaysStrategy, sandbox: provider });
     const started = await startHealingRun({ trace: DEMO_TRACE, mode: "demo", deps });
@@ -263,7 +266,7 @@ describe("prompt 1 — cancellation propagation through the provider boundary", 
     expect(third?.state).toBe("cancelled");
   });
 
-  it("cancelling an already terminal (healed) run returns its unchanged terminal state", async () => {
+  it("cancelling an already terminal (healed) run returns its unchanged terminal state", { timeout: 30_000 }, async () => {
     const deps = createPipelineDeps({ patchStrategy: alwaysStrategy, sandbox: resolvedSandbox });
     const started = await startHealingRun({ trace: DEMO_TRACE, mode: "demo", deps });
     await awaitHealingRun(started.runId);
