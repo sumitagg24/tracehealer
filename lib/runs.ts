@@ -164,6 +164,14 @@ export function isRunActive(runId: string): boolean {
   return inflight.has(runId);
 }
 
+/**
+ * Await every in-flight run in this process. Used by tests and by graceful
+ * shutdown so no background write races a store teardown.
+ */
+export async function drainInflightRuns(): Promise<void> {
+  await Promise.allSettled([...inflight.values()].map((entry) => entry.promise));
+}
+
 export async function cancelHealingRun(runId: string, tenantId?: string): Promise<RunSummary | null> {
   const entry = inflight.get(runId);
   if (entry) {

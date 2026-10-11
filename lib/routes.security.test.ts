@@ -13,6 +13,8 @@ import { GET as incidentsGet } from "@/app/api/incidents/route";
 import { POST as healPost } from "@/app/api/heal/route";
 import { POST as webhookPost } from "@/app/api/webhooks/neatlogs/route";
 import { issueSessionToken, SESSION_COOKIE_NAME, type Session } from "@/lib/auth";
+import { resetDurableStack } from "@/lib/db";
+import { drainInflightRuns } from "@/lib/runs";
 import { resetRateLimits } from "@/lib/http";
 import { DEMO_TRACE } from "@/lib/demo-data";
 import type { RunState, RunSummary } from "@/lib/types";
@@ -63,7 +65,9 @@ async function waitForTerminal(runId: string, timeoutMs = 25_000): Promise<RunSu
   return null;
 }
 
-const ENV_KEYS = ["TRACEHEALER_DATA_DIR", "TRACEHEALER_AUTH_MODE", "TRACEHEALER_SESSION_SECRET", "NEATLOGS_WEBHOOK_SECRET"] as const;
+// Tenant isolation is enforced by the durable adapter, so this suite runs
+// against TRACEHEALER_STORE=sqlite — the production persistence mode.
+const ENV_KEYS = ["TRACEHEALER_DATA_DIR", "TRACEHEALER_STORE", "TRACEHEALER_DB_FILE", "TRACEHEALER_AUTH_MODE", "TRACEHEALER_SESSION_SECRET", "NEATLOGS_WEBHOOK_SECRET"] as const;
 const saved: Record<string, string | undefined> = {};
 let dir: string | null = null;
 
@@ -72,9 +76,13 @@ beforeEach(async () => {
   dir = await mkdtemp(path.join(tmpdir(), "tracehealer-security-"));
   Object.assign(process.env, {
     TRACEHEALER_DATA_DIR: dir,
+    TRACEHEALER_STORE: "sqlite",
+    TRACEHEALER_DB_FILE: path.join(dir, "tracehealer.db"),
     TRACEHEALER_AUTH_MODE: "session",
     TRACEHEALER_SESSION_SECRET: "security-test-secret",
   });
+  seededRunId = null;
+  await resetDurableStack();
   resetRateLimits();
 });
 
@@ -83,6 +91,10 @@ afterEach(async () => {
     if (saved[key] === undefined) Reflect.deleteProperty(process.env, key);
     else process.env[key] = saved[key];
   }
+  // Let in-flight runs finish their store writes before closing sqlite
+  // (Windows locks open database files, and a straggler write would throw).
+  await drainInflightRuns();
+  await resetDurableStack();
   resetRateLimits();
   if (dir) await rm(dir, { recursive: true, force: true });
   dir = null;

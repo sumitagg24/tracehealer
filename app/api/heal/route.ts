@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { ZodError } from "zod";
 import { DEMO_TRACE } from "@/lib/demo-data";
 import { runHealingPipeline } from "@/lib/pipeline";
+import { createPipelineDeps } from "@/lib/providers";
 import { healRequestSchema } from "@/lib/schema";
 import {
   assertJsonContentType,
@@ -13,8 +14,8 @@ import {
   readBoundedText,
 } from "@/lib/http";
 import { assertRateLimit } from "@/lib/rate-limit";
-import { getHealingRun, findRunByIdempotencyKey } from "@/lib/store";
 import { authorize } from "@/lib/auth";
+import { runStoreForTenant } from "@/lib/run-read";
 
 export const runtime = "nodejs";
 
@@ -26,7 +27,7 @@ export const runtime = "nodejs";
 export async function POST(request: Request) {
   const correlation = correlationId(request);
   try {
-    authorize(request, "run:create");
+    const session = authorize(request, "run:create");
     assertSameOrigin(request);
     await assertRateLimit(`heal:${clientIp(request)}`);
     assertJsonContentType(request);
@@ -34,9 +35,12 @@ export async function POST(request: Request) {
     const body = healRequestSchema.parse(raw ? JSON.parse(raw) : {});
 
     if (body.idempotencyKey) {
-      const existing = await findRunByIdempotencyKey(body.idempotencyKey);
+      // Idempotency lookups go through the caller's tenant-scoped store so a
+      // key from one tenant can never resolve another tenant's run.
+      const store = await runStoreForTenant(session.tenantId);
+      const existing = await store.findByIdempotencyKey(body.idempotencyKey);
       if (existing) {
-        const run = await getHealingRun(existing.id);
+        const run = await store.getRun(existing.id);
         if (run) {
           return NextResponse.json(
             { ok: true, result: run, deduplicated: true },
@@ -49,6 +53,9 @@ export async function POST(request: Request) {
     const result = await runHealingPipeline(body.trace ?? DEMO_TRACE, body.mode, {
       correlationId: correlation,
       idempotencyKey: body.idempotencyKey,
+      // Persist through the caller's tenant-scoped store so the sync path and
+      // the async /api/runs path share one tenant-isolated adapter.
+      deps: createPipelineDeps({ runStore: await runStoreForTenant(session.tenantId) }),
     });
 
     return NextResponse.json(
