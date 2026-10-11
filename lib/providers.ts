@@ -1,4 +1,5 @@
 import { buildLocalContextGraph, type RepositoryContext } from "@/lib/context";
+import { TraceHealerError } from "@/lib/errors";
 import { publishDraftPullRequest, type PullRequestInput, type PullRequestResult } from "@/lib/github";
 import { exportHealedTrace, notifySlack } from "@/lib/integrations";
 import { executeDemoSandbox, type SandboxResult } from "@/lib/sandbox";
@@ -16,6 +17,7 @@ import {
   saveRunSummary,
   updateRunState,
 } from "@/lib/store";
+import { loadPolicy } from "@/lib/policy";
 import { normalizeTracePayload } from "@/lib/trace-normalizer";
 import type { AgentTrace, AuditEvent, Diagnosis, HealResult, RunState, RunSummary } from "@/lib/types";
 
@@ -135,6 +137,27 @@ export const localProcessSandbox: SandboxProvider = {
     executeDemoSandbox(trace, { workspaceId, dataRoot, proposal, signal }),
 };
 
+/**
+ * Choose the sandbox provider requested by policy.
+ *
+ * `TRACEHEALER_SANDBOX_PROVIDER=docker` has no runtime binding yet: the container
+ * provider (`lib/container-sandbox.ts`) builds the hardened `docker run`
+ * arguments, declares its guarantees, and is proven by a live isolation test,
+ * but the pipeline still executes the trusted fixture in-process. Requesting it
+ * therefore fails closed instead of silently downgrading to the in-process
+ * sandbox, which is the fall-back the container documentation promises never to
+ * make.
+ */
+export function selectSandboxProvider(policy = loadPolicy()): SandboxProvider {
+  if (policy.sandboxProvider === "docker") {
+    throw new TraceHealerError(
+      "unconfigured",
+      "TRACEHEALER_SANDBOX_PROVIDER=docker is not wired to the pipeline yet; unset it to run the in-process sandbox",
+    );
+  }
+  return localProcessSandbox;
+}
+
 export const filesystemRunStore: RunStore = {
   saveRun: saveHealingRun,
   getRun: getHealingRun,
@@ -173,7 +196,9 @@ export function createPipelineDeps(overrides: Partial<PipelineDeps> = {}): Pipel
   return {
     contextProvider: localGraphContextProvider,
     patchStrategy: deterministicStrategy,
-    sandbox: localProcessSandbox,
+    // An explicitly injected provider (including a container-backed one) always
+    // wins; selection only refuses when the default would silently downgrade.
+    sandbox: overrides.sandbox ?? selectSandboxProvider(),
     runStore: filesystemRunStore,
     pullRequest: githubPullRequestProvider,
     notifications: defaultNotificationProvider,

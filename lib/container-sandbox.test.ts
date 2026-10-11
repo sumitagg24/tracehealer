@@ -10,6 +10,7 @@ import {
   runIsolationProof,
 } from "@/lib/container-sandbox";
 import { loadPolicy } from "@/lib/policy";
+import { createPipelineDeps } from "@/lib/providers";
 
 const saved: Record<string, string | undefined> = {};
 const KEYS = [
@@ -21,6 +22,7 @@ const KEYS = [
   "TRACEHEALER_CONTAINER_GID",
   "GITHUB_TOKEN",
   "NEATLOGS_API_KEY",
+  "TRACEHEALER_SANDBOX_PROVIDER",
 ] as const;
 
 beforeEach(() => {
@@ -101,6 +103,24 @@ describe("prompt 4 — container isolation contract", () => {
     const envProbe = probes.find((probe) => probe.name === "no-server-env");
     expect(envProbe?.script).toMatch(/GITHUB_TOKEN/);
     expect(envProbe?.description).toMatch(/No credential variable/);
+  });
+});
+
+describe("prompt 4 — provider selection fails closed", () => {
+  it("refuses to silently downgrade a docker request to the in-process sandbox", () => {
+    process.env.TRACEHEALER_SANDBOX_PROVIDER = "docker";
+    expect(() => createPipelineDeps()).toThrowError(/not wired to the pipeline/);
+    // An explicitly injected provider is still honored (there is no silent
+    // downgrade, and no false refusal of a real container provider).
+    expect(
+      createPipelineDeps({ sandbox: { id: "injected", run: async () => ({} as never) } }).sandbox.id,
+    ).toBe("injected");
+  });
+
+  it("keeps the in-process sandbox as the default", () => {
+    delete process.env.TRACEHEALER_SANDBOX_PROVIDER;
+    expect(createPipelineDeps().sandbox.id).toBe("local-process");
+    expect(loadPolicy().sandboxProvider).toBe("local-process");
   });
 });
 
