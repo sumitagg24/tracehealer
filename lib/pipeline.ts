@@ -3,6 +3,7 @@ import path from "node:path";
 import { asTraceHealerError, TraceHealerError } from "@/lib/errors";
 import { createPipelineDeps, type PipelineDeps } from "@/lib/providers";
 import { redactLog } from "@/lib/redact";
+import { isTerminal } from "@/lib/run-state";
 import { loadPolicy, matchPathGlob } from "@/lib/policy";
 import { healTrace } from "@/lib/engine";
 import type { AgentTrace, AuditEvent, HealResult, RunState } from "@/lib/types";
@@ -66,8 +67,16 @@ export async function runHealingPipeline(
   const events: AuditEvent[] = [];
   let seq = 0;
 
+  const signal = options.signal;
+
   const record = async (next: RunState, message: string, detail?: Record<string, unknown>) => {
-    await options.onState?.(next);
+    // A cancelled run's terminal state belongs to the coordinator: once the
+    // signal is aborted the pipeline still records what it found, but it must
+    // not settle the run, so its `needs-review` verdict can never race the
+    // cancellation that is being written at the same time.
+    if (!(signal?.aborted && isTerminal(next))) {
+      await options.onState?.(next);
+    }
     const event: AuditEvent = {
       seq: (seq += 1),
       at: new Date().toISOString(),
@@ -86,7 +95,6 @@ export async function runHealingPipeline(
     }
   };
 
-  const signal = options.signal;
   if (signal?.aborted) {
     throw new TraceHealerError("cancelled", "Run cancelled before it started");
   }
@@ -134,7 +142,7 @@ export async function runHealingPipeline(
       startedAt,
       completedAt: new Date().toISOString(),
     };
-    await persistResult(deps, unsupported, "needs-review");
+    await persistResult(deps, unsupported, "needs-review", signal);
     return unsupported;
   }
 
@@ -173,7 +181,7 @@ export async function runHealingPipeline(
       startedAt,
       completedAt: new Date().toISOString(),
     };
-    await persistResult(deps, failed, "needs-review");
+    await persistResult(deps, failed, "needs-review", signal);
     return failed;
   }
 
@@ -213,7 +221,7 @@ export async function runHealingPipeline(
       startedAt,
       completedAt: new Date().toISOString(),
     };
-    await persistResult(deps, blocked, "needs-review");
+    await persistResult(deps, blocked, "needs-review", signal);
     return blocked;
   }
 
@@ -359,9 +367,7 @@ export async function runHealingPipeline(
     completedAt: new Date().toISOString(),
   };
 
-  // When the run was cancelled or timed out mid-flight the coordinator owns the
-  // terminal state, so the pipeline records its result without settling.
-  await persistResult(deps, result, result.state ?? "healed", options.signal?.aborted === true);
+  await persistResult(deps, result, result.state ?? "healed", signal);
   return result;
 }
 
@@ -369,10 +375,12 @@ async function persistResult(
   deps: PipelineDeps,
   result: HealResult,
   state: RunState,
-  deferSettlement = false,
+  signal?: AbortSignal,
 ) {
   await deps.runStore.saveRun(result);
-  if (deferSettlement) return;
+  // When the run was cancelled or timed out mid-flight the coordinator owns the
+  // terminal state, so the pipeline records its result without settling it.
+  if (signal?.aborted === true) return;
   await deps.runStore.updateState(result.id, state, result.completedAt);
   await deps.runStore.saveSummary({
     id: result.id,

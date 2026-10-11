@@ -2,10 +2,11 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { getDurableStack, resetDurableStack } from "@/lib/db";
+import { getDurableStack, resetDurableStack, runStoreFor } from "@/lib/db";
 import { DEMO_TRACE } from "@/lib/demo-data";
 import { computeMetrics } from "@/lib/metrics";
 import { awaitHealingRun, getRunProgress, startHealingRun } from "@/lib/runs";
+import type { RunState } from "@/lib/types";
 
 const ENV_KEYS = [
   "TRACEHEALER_STORE",
@@ -89,4 +90,89 @@ describe("prompt 3 — durable run lifecycle", () => {
     expect(metrics.runCount).toBe(1);
     expect(metrics.healed).toBe(1);
   }, 30_000);
+});
+
+describe("prompt 4 — durable cancellation authority", () => {
+  it("replaces the needs-review verdict an aborted pipeline wrote, with an audit trail", async () => {
+    const stack = await getDurableStack();
+    await stack.state.createRun({
+      tenantId: "tenant-a",
+      mode: "demo",
+      traceId: DEMO_TRACE.id,
+      runId: "heal_durable_cancel",
+    });
+    const created = await stack.state.getRun("tenant-a", "heal_durable_cancel");
+    // A cancelled pipeline can settle itself as needs-review before the
+    // coordinator records the cancellation.
+    await stack.state.upsertSummary("tenant-a", {
+      ...created!.summary,
+      state: "needs-review" as RunState,
+    });
+    expect((await stack.state.getRun("tenant-a", "heal_durable_cancel"))?.state).toBe(
+      "needs-review",
+    );
+
+    const store = await runStoreFor("tenant-a");
+    const cancelled = await store!.cancelRun("heal_durable_cancel");
+    expect(cancelled?.state).toBe("cancelled");
+
+    const after = await stack.state.getRun("tenant-a", "heal_durable_cancel");
+    expect(after?.state).toBe("cancelled");
+    expect(after?.summary.state).toBe("cancelled");
+
+    const transitions = await stack.state.listTransitions("tenant-a", "heal_durable_cancel");
+    expect(transitions.at(-1)).toMatchObject({
+      from: "needs-review",
+      to: "cancelled",
+      reason: "cancelled by operator",
+    });
+
+    const events = await stack.state.listEvents("tenant-a", "heal_durable_cancel");
+    expect(events.at(-1)).toMatchObject({ state: "cancelled", actor: "orchestrator" });
+
+    // Repeating the cancellation changes nothing, and the late verdict cannot
+    // resurrect the run afterwards.
+    const repeat = await store!.cancelRun("heal_durable_cancel");
+    expect(repeat?.state).toBe("cancelled");
+    await stack.state.upsertSummary("tenant-a", {
+      ...after!.summary,
+      state: "needs-review" as RunState,
+    });
+    expect((await stack.state.getRun("tenant-a", "heal_durable_cancel"))?.state).toBe(
+      "cancelled",
+    );
+
+    // Another tenant cannot cancel or observe this run.
+    const other = await runStoreFor("tenant-b");
+    expect(await other!.cancelRun("heal_durable_cancel")).toBeNull();
+  });
+
+  it("never rewrites a verified healed run", async () => {
+    const stack = await getDurableStack();
+    const created = await stack.state.createRun({
+      tenantId: "tenant-a",
+      mode: "demo",
+      traceId: DEMO_TRACE.id,
+      runId: "heal_durable_healed",
+    });
+    // Walk the real lifecycle so the verified state is reached legitimately.
+    const lifecycle: RunState[] = [
+      "reproducing",
+      "diagnosing",
+      "patching",
+      "verifying",
+      "committing",
+      "healed",
+    ];
+    let summary = created.record.summary;
+    for (const state of lifecycle) {
+      summary = await stack.state.upsertSummary("tenant-a", { ...summary, state });
+    }
+    expect(summary.state).toBe("healed");
+
+    const store = await runStoreFor("tenant-a");
+    const after = await store!.cancelRun("heal_durable_healed");
+    expect(after?.state).toBe("healed");
+    expect((await stack.state.getRun("tenant-a", "heal_durable_healed"))?.state).toBe("healed");
+  });
 });

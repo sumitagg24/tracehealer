@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { getRunSummary, saveRunSummary } from "@/lib/store";
+import { cancelRunSummary, getRunSummary, saveRunSummary } from "@/lib/store";
 import type { RunState, RunSummary } from "@/lib/types";
 
 let dir: string | null = null;
@@ -72,5 +72,54 @@ describe("run summary finality", () => {
 
   it("rejects an unsafe run id", async () => {
     await expect(saveRunSummary(summary("../escape", "queued"))).rejects.toThrow(/Unsafe run id/);
+  });
+});
+
+describe("authoritative cancellation", () => {
+  it("replaces the needs-review verdict an aborted pipeline wrote for itself", async () => {
+    await saveRunSummary(summary("heal_cancel", "verifying"));
+    // The aborted pipeline settles first: this is the interleaving that used to
+    // strand a cancelled run as needs-review.
+    await saveRunSummary(summary("heal_cancel", "needs-review"));
+    expect((await getRunSummary("heal_cancel"))?.state).toBe("needs-review");
+
+    const cancelled = await cancelRunSummary("heal_cancel", "2026-01-02T00:00:00.000Z");
+    expect(cancelled?.state).toBe("cancelled");
+    expect(cancelled?.completedAt).toBe("2026-01-02T00:00:00.000Z");
+    expect((await getRunSummary("heal_cancel"))?.state).toBe("cancelled");
+
+    // The late verdict cannot resurrect the run afterwards.
+    await saveRunSummary(summary("heal_cancel", "needs-review"));
+    expect((await getRunSummary("heal_cancel"))?.state).toBe("cancelled");
+  });
+
+  it("never rewrites a verified healed run", async () => {
+    await saveRunSummary(summary("heal_healed", "healed"));
+    const after = await cancelRunSummary("heal_healed", "2026-01-02T00:00:00.000Z");
+    expect(after?.state).toBe("healed");
+  });
+
+  it("leaves a retryable delivery failure and a decided timeout alone", async () => {
+    await saveRunSummary(summary("heal_delivery", "delivery-failed"));
+    expect((await cancelRunSummary("heal_delivery", "2026-01-02T00:00:00.000Z"))?.state).toBe(
+      "delivery-failed",
+    );
+
+    await saveRunSummary(summary("heal_timeout", "timed-out"));
+    expect((await cancelRunSummary("heal_timeout", "2026-01-02T00:00:00.000Z"))?.state).toBe(
+      "timed-out",
+    );
+  });
+
+  it("is idempotent and keeps the first cancellation timestamp", async () => {
+    await saveRunSummary(summary("heal_repeat", "verifying"));
+    const first = await cancelRunSummary("heal_repeat", "2026-01-02T00:00:00.000Z");
+    const second = await cancelRunSummary("heal_repeat", "2026-01-03T00:00:00.000Z");
+    expect(first?.completedAt).toBe("2026-01-02T00:00:00.000Z");
+    expect(second?.completedAt).toBe("2026-01-02T00:00:00.000Z");
+  });
+
+  it("returns null for an unknown run", async () => {
+    expect(await cancelRunSummary("heal_missing", "2026-01-02T00:00:00.000Z")).toBeNull();
   });
 });

@@ -5,6 +5,7 @@ import { executeDemoSandbox, type SandboxResult } from "@/lib/sandbox";
 import { deterministicStrategy } from "@/lib/strategies";
 import {
   appendRunEvent,
+  cancelRunSummary,
   findRunByIdempotencyKey,
   getHealingRun,
   getRunSummary,
@@ -73,6 +74,12 @@ export interface RunStore {
   getSummary(id: string): Promise<RunSummary | null>;
   listSummaries(limit?: number): Promise<RunSummary[]>;
   updateState(id: string, state: RunState, completedAt?: string | null): Promise<RunSummary | null>;
+  /**
+   * Record an authoritative human cancellation. Unlike `updateState`, it may
+   * replace a non-verified terminal verdict (the `needs-review` a pipeline writes
+   * after observing the abort) but never a verified or already-decided run.
+   */
+  cancelRun(id: string, completedAt?: string): Promise<RunSummary | null>;
   appendEvent(runId: string, event: AuditEvent): Promise<void>;
   readEvents(runId: string): Promise<AuditEvent[]>;
   findByIdempotencyKey(key: string): Promise<RunSummary | null>;
@@ -136,6 +143,7 @@ export const filesystemRunStore: RunStore = {
   getSummary: getRunSummary,
   listSummaries: listRunSummaries,
   updateState: updateRunState,
+  cancelRun: cancelRunSummary,
   appendEvent: appendRunEvent,
   readEvents: readRunEvents,
   findByIdempotencyKey: findRunByIdempotencyKey,

@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { appendFile, mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { isTerminal } from "@/lib/run-state";
+import { canCancel, isTerminal } from "@/lib/run-state";
 import type { AuditEvent, HealResult, Incident, RunState, RunSummary } from "@/lib/types";
 
 function root() {
@@ -131,6 +131,34 @@ export async function listRunSummaries(limit = 25): Promise<RunSummary[]> {
   } catch {
     return [];
   }
+}
+
+/**
+ * Record an authoritative human cancellation.
+ *
+ * `saveRunSummary` refuses any write that contradicts a terminal state, which is
+ * what protects a finalized run. Cancellation needs exactly one documented
+ * exception: a pipeline that observes the abort can write the terminal
+ * `needs-review` verdict *before* the coordinator records the cancel, so the
+ * coordinator must still be able to replace that non-verified verdict. Verified
+ * and already-decided runs stay untouched (see `canCancel`).
+ */
+export async function cancelRunSummary(
+  id: string,
+  completedAt: string,
+): Promise<RunSummary | null> {
+  if (!isSafeId(id)) return null;
+  const file = path.join(root(), "summaries", `${id}.json`);
+  return withFileLock(file, async () => {
+    const existing = await readJson<RunSummary>(file);
+    if (!existing) return null;
+    // Repeating a cancellation is a no-op so the original timestamp is kept.
+    if (existing.state === "cancelled") return existing;
+    if (!canCancel(existing.state)) return existing;
+    const cancelled: RunSummary = { ...existing, state: "cancelled", completedAt };
+    await writeJsonUnlocked(file, cancelled);
+    return cancelled;
+  });
 }
 
 export async function updateRunState(id: string, state: RunState, completedAt: string | null = null) {

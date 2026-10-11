@@ -79,6 +79,17 @@ export class DurableRunStore implements RunStore {
     return summary;
   }
 
+  /**
+   * Authoritative cancellation. Unlike `updateState`, it may replace the
+   * non-verified terminal verdict a cancelled pipeline wrote for itself, while a
+   * verified `healed` run or a retryable `delivery-failed` one is untouched.
+   * The durable store stamps its own timestamp.
+   */
+  async cancelRun(id: string): Promise<RunSummary | null> {
+    const record = await this.state.cancelRun(this.tenantId, id, "cancelled by operator");
+    return record?.summary ?? null;
+  }
+
   async appendEvent(runId: string, event: AuditEvent): Promise<void> {
     await this.state.appendEvent(this.tenantId, runId, event);
   }

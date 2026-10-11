@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { SqlDriver, SqlExecutor, SqlParam } from "@/lib/db/driver";
 import { migrate, type MigrationResult } from "@/lib/db/migrations";
 import { TraceHealerError } from "@/lib/errors";
-import { assertTransition, canTransition } from "@/lib/run-state";
+import { assertTransition, canCancel, canTransition } from "@/lib/run-state";
 import type { AuditEvent, HealResult, RunState, RunSummary } from "@/lib/types";
 
 /**
@@ -426,6 +426,65 @@ export class DurableStateStore {
         attempt: 1,
         actor: "orchestrator",
         correlationId: "system",
+      });
+      const updated = await tx.queryOne<RunRow>(
+        "SELECT * FROM runs WHERE id = ? AND tenant_id = ?",
+        [runId, tenantId],
+      );
+      return this.toRecord(updated as RunRow);
+    });
+  }  /**
+   * Record an authoritative human cancellation.
+   *
+   * `settle` rejects any transition the state machine does not allow, which is
+   * what protects a verified run. Cancellation needs exactly one documented
+   * exception: a pipeline that observes the abort can write the terminal
+   * `needs-review` verdict *before* the coordinator records the cancel, so the
+   * coordinator must still be able to replace that non-verified verdict. A
+   * verified `healed` run, a `delivery-failed` one, and a decided `timed-out`
+   * run are never rewritten (see `canCancel`).
+   */
+  async cancelRun(
+    tenantId: string,
+    runId: string,
+    reason = "cancelled by operator",
+  ): Promise<DurableRunRecord | null> {
+    return this.driver.transaction(async (tx) => {
+      const row = await tx.queryOne<RunRow>(
+        "SELECT * FROM runs WHERE id = ? AND tenant_id = ?",
+        [runId, tenantId],
+      );
+      if (!row) return null;
+      const current = row.state as RunState;
+      // Repeating a cancellation is a no-op so the original decision stands.
+      if (current === "cancelled" || !canCancel(current)) return this.toRecord(row);
+
+      const at = this.at().toISOString();
+      const summary = parse<RunSummary>(row.summary_json);
+      const updatedSummary: RunSummary = {
+        ...(summary as RunSummary),
+        state: "cancelled",
+        status: "needs-review",
+        completedAt: at,
+      };
+      await tx.execute(
+        `UPDATE runs SET state = ?, status = ?, summary_json = ?, completed_at = ?, updated_at = ?
+         WHERE id = ? AND tenant_id = ?`,
+        ["cancelled", updatedSummary.status, JSON.stringify(updatedSummary), at, at, runId, tenantId],
+      );
+      await tx.execute(
+        `INSERT INTO run_transitions (run_id, tenant_id, from_state, to_state, reason, at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [runId, tenantId, current, "cancelled", reason, at],
+      );
+      await this.appendEventWith(tx, runId, tenantId, {
+        seq: 0,
+        at,
+        state: "cancelled",
+        message: reason,
+        attempt: 1,
+        actor: "orchestrator",
+        correlationId: "human-cancel",
       });
       const updated = await tx.queryOne<RunRow>(
         "SELECT * FROM runs WHERE id = ? AND tenant_id = ?",

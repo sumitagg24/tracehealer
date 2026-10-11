@@ -121,7 +121,10 @@ export async function startHealingRun(input: StartRunInput): Promise<StartedRun>
       if (entry.cancelled) {
         const reconciled = { ...result, state: "cancelled" as RunState, completedAt: new Date().toISOString() };
         await deps.runStore.saveRun(reconciled);
-        await deps.runStore.updateState(runId, "cancelled", reconciled.completedAt);
+        // The human's cancellation is the authoritative terminal decision, so it
+        // may replace a `needs-review` the pipeline wrote after observing the
+        // abort. A verified run is never rewritten by this call.
+        await deps.runStore.cancelRun(runId, reconciled.completedAt);
         return reconciled;
       }
       await deps.runStore.updateState(runId, result.state ?? "healed", result.completedAt);
@@ -129,7 +132,11 @@ export async function startHealingRun(input: StartRunInput): Promise<StartedRun>
     } catch (error) {
       const failure = error instanceof TraceHealerError ? error : null;
       const state: RunState = timedOut ? "timed-out" : entry.cancelled ? "cancelled" : "needs-review";
-      await deps.runStore.updateState(runId, state, new Date().toISOString());
+      if (entry.cancelled) {
+        await deps.runStore.cancelRun(runId, new Date().toISOString());
+      } else {
+        await deps.runStore.updateState(runId, state, new Date().toISOString());
+      }
       await deps.runStore.appendEvent(runId, {
         seq: 99_999,
         at: new Date().toISOString(),
@@ -172,20 +179,32 @@ export async function drainInflightRuns(): Promise<void> {
   await Promise.allSettled([...inflight.values()].map((entry) => entry.promise));
 }
 
+/**
+ * Cancel a run.
+ *
+ * The cancellation is written through the coordinator-owned `cancelRun` rather
+ * than a plain summary write, so it wins against the `needs-review` verdict a
+ * pipeline persists when it observes the abort mid-flight. It still never
+ * rewrites a verified `healed` run, a retryable `delivery-failed` one, or an
+ * already-decided `timed-out` one: cancelling a finished run reports the state
+ * the run actually reached.
+ */
 export async function cancelHealingRun(runId: string, tenantId?: string): Promise<RunSummary | null> {
   const entry = inflight.get(runId);
-  if (entry) {
-    entry.cancelled = true;
-    // Abort propagates to the sandbox provider so in-flight work stops promptly.
-    entry.controller.abort();
-  }
   const store = entry?.store ?? (await runStoreForTenant(tenantId ?? defaultTenant()));
-  const summary = await store.getSummary(runId);
-  if (!summary) return null;
-  if (isTerminal(summary.state)) return summary;
-  const cancelled: RunSummary = { ...summary, state: "cancelled", completedAt: new Date().toISOString() };
-  await store.saveSummary(cancelled);
-  return cancelled;
+
+  if (!entry) {
+    // Nothing is executing here, so an existing decision is final. Only a run
+    // left active (for example by a crashed worker) is settled as cancelled.
+    const settled = await store.getSummary(runId);
+    if (!settled || isTerminal(settled.state)) return settled;
+    return store.cancelRun(runId, new Date().toISOString());
+  }
+
+  entry.cancelled = true;
+  // Abort propagates to the sandbox provider so in-flight work stops promptly.
+  entry.controller.abort();
+  return store.cancelRun(runId, new Date().toISOString());
 }
 
 export async function getRunProgress(runId: string, tenantId?: string): Promise<RunProgress | null> {

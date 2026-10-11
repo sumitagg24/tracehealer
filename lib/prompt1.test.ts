@@ -9,9 +9,11 @@ import { canTransition } from "@/lib/run-state";
 import { awaitHealingRun, cancelHealingRun, startHealingRun } from "@/lib/runs";
 import { getRunSummary } from "@/lib/store";import {
   createPipelineDeps,
+  filesystemRunStore,
   type NotificationProvider,
   type PatchStrategy,
   type PullRequestProvider,
+  type RunStore,
   type SandboxProvider,
 } from "@/lib/providers";
 import type { SandboxResult } from "@/lib/sandbox";
@@ -244,6 +246,32 @@ describe("prompt 1 — cancellation propagation through the provider boundary", 
     expect(canTransition("cancelled", "healed")).toBe(false);
     const after = await getRunSummary(started.runId);
     expect(after?.state).toBe("cancelled");
+  });
+
+  it("the aborted pipeline's own verdict never outlives the cancellation", { timeout: 30_000 }, async () => {
+    const { provider, entered } = abortObservingSandbox();
+    // Observe the writes themselves, so the assertion does not depend on which
+    // of two concurrent writers happened to win a read race.
+    const persisted: RunState[] = [];
+    const runStore: RunStore = {
+      ...filesystemRunStore,
+      updateState: (id, state, completedAt) => {
+        persisted.push(state);
+        return filesystemRunStore.updateState(id, state, completedAt);
+      },
+    };
+    const deps = createPipelineDeps({ patchStrategy: alwaysStrategy, sandbox: provider, runStore });
+    const started = await startHealingRun({ trace: DEMO_TRACE, mode: "demo", deps });
+
+    expect(await waitFor(() => entered())).toBe(true);
+    const cancelled = await cancelHealingRun(started.runId);
+    expect(cancelled?.state).toBe("cancelled");
+
+    await awaitHealingRun(started.runId);
+    // The coordinator owns the terminal decision, so the pipeline records its
+    // needs-review finding without settling the run.
+    expect(persisted).not.toContain("needs-review");
+    expect((await getRunSummary(started.runId))?.state).toBe("cancelled");
   });
 
   it("repeated cancellation is idempotent and leaves a terminal run unchanged", { timeout: 30_000 }, async () => {
