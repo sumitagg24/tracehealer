@@ -16,7 +16,13 @@ use tauri::{
 };
 
 /// Terminal run states that deserve a native notification.
-const NOTIFY_STATES: &[&str] = &["healed", "needs-review", "cancelled", "timed-out", "delivery-failed"];
+const NOTIFY_STATES: &[&str] = &[
+    "healed",
+    "needs-review",
+    "cancelled",
+    "timed-out",
+    "delivery-failed",
+];
 
 fn notify_run_state(app: &tauri::AppHandle, run_id: &str, state: &str) {
     if !NOTIFY_STATES.contains(&state) {
@@ -69,6 +75,7 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
 
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_store::Builder::default().build())
         .manage(commands::DesktopState::default())
@@ -80,6 +87,7 @@ fn main() {
             commands::get_session_state,
             commands::persist_session,
             commands::clear_session,
+            commands::begin_authorization,
             commands::report_connection,
             commands::push_run_update,
             commands::update_tray_state_label,

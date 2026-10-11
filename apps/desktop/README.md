@@ -26,20 +26,34 @@ npm run typecheck
 The desktop app depends on the Rust toolchain. `cargo` must be available before
 `npm run dev` or `npm run build` will succeed.
 
-## Status
+## Build verification
 
-The desktop source is committed and tested at the unit level. Builds for
-Windows, macOS, and Linux require a working Rust toolchain and the appropriate
-signing credentials before the installers can be distributed as production
-release assets.
+- Desktop frontend typecheck and unit tests pass locally.
+- `cargo fmt --check` passes locally.
+- Compiling/linking the Rust shell requires a Windows SDK + Visual Studio C++
+  Build Tools (MSVC) on Windows; this dev machine does not have them, so
+  `cargo check`, `cargo test`, `cargo clippy`, and `tauri build` are proven by
+  the GitHub `desktop` workflow on windows-latest, macos-latest, and
+  ubuntu-latest instead.
+- Linux builds need `pkg-config` and `libdbus-1-dev` (the OS keychain backend);
+  the workflow installs them.
 
-Production distribution is blocked until signing/notarization credentials exist
-and release artifacts are actually produced. An unsigned local build is not a
-production release.
+All CI-produced installers are **unsigned test builds** (artifact names end in
+`-unsigned`). Production distribution is blocked until signing/notarization
+credentials exist and release artifacts are actually produced. An unsigned
+local build is not a production release.
 
 ## Security highlights
 
-- Tauri capabilities are least privilege.
-- Deep links accept only known `tracehealer://` targets.
-- Auto-update accepts only signed, trusted-channel update metadata.
+- Tauri capabilities are least privilege: no shell, no filesystem, no process
+  bridge, no arbitrary HTTP plugin.
+- Deep links accept only `tracehealer://incident/:id` and `tracehealer://run/:id`
+  with a validated identifier; everything else is rejected.
+- OAuth uses a per-attempt CSPRNG PKCE state/verifier; the callback state is
+  consumed exactly once, so a captured callback URL cannot be replayed.
+- The session token is stored only in the OS credential vault and is never
+  written to web storage, the Tauri store file, or a plaintext file.
+- The system browser is only opened for https URLs (or http on loopback).
+- There is no auto-updater in this build: unsigned update metadata cannot
+  install because no update channel exists at all.
 - No credentials are bundled into the desktop binary.

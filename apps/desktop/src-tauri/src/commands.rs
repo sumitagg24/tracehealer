@@ -1,5 +1,6 @@
-use crate::auth::{self, StoredSession};
+use crate::auth::{self, PkcePair, StoredSession};
 use serde::{Deserialize, Serialize};
+use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager, State};
 use thiserror::Error;
 
@@ -14,17 +15,18 @@ mod clock {
     }
 }
 
-
 // ---------------------------------------------------------------------------
 // Shared desktop state
 // ---------------------------------------------------------------------------
 
+/// Managed renderer-facing state. Interior mutability keeps the Tauri
+/// `State<T>` access immutable while still letting commands record the last
+/// connection report, the in-flight PKCE attempt, and the notification opt-in.
 #[derive(Default)]
 pub struct DesktopState {
-    /// Last known connection state sent back to the renderer.
-    connection_state: ConnectionState,
-    /// True when native notifications are currently allowed by the user.
-    notifications_allowed: bool,
+    connection_state: Mutex<ConnectionState>,
+    pending_pkce: Mutex<Option<PkcePair>>,
+    notifications_allowed: Mutex<bool>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -53,18 +55,35 @@ pub enum DesktopError {
 
 pub type Result<T> = std::result::Result<T, DesktopError>;
 
+/// Only https URLs may leave the app, with plain http allowed exclusively for
+/// loopback development servers. Anything else (file:, javascript:, arbitrary
+/// schemes) is rejected before it reaches the system opener.
+fn is_allowed_http_url(url: &url::Url) -> bool {
+    match url.scheme() {
+        "https" => true,
+        "http" => matches!(
+            url.host_str(),
+            Some("localhost") | Some("127.0.0.1") | Some("[::1]") | Some("::1")
+        ),
+        _ => false,
+    }
+}
+
 /// Load the stored session from the OS keychain.
 #[tauri::command]
 pub fn get_session_state() -> Result<SessionView> {
     match auth::load_session() {
-        Ok(session) => Ok(SessionView {
-            server_url: session.server_url,
-            tenant_id: session.tenant_id,
-            workspace_id: session.workspace_id,
-            role: session.role,
-            expires_at: session.expires_at,
-            valid: auth::session_is_valid(chrono_epoch_secs()),
-        }),
+        Ok(session) => {
+            let valid = auth::session_is_valid(&session, chrono_epoch_secs());
+            Ok(SessionView {
+                server_url: session.server_url,
+                tenant_id: session.tenant_id,
+                workspace_id: session.workspace_id,
+                role: session.role,
+                expires_at: session.expires_at,
+                valid,
+            })
+        }
         Err(auth::AuthError::NoSession(_)) => Ok(SessionView {
             server_url: String::new(),
             tenant_id: String::new(),
@@ -101,15 +120,45 @@ pub fn clear_session() -> Result<()> {
     })
 }
 
+/// Mint a PKCE pair for one authorization attempt and return the URL the
+/// renderer should open in the system browser. The state stays in native
+/// memory only — never in the webview — and is consumed exactly once by
+/// `handle_callback`.
+#[tauri::command]
+pub fn begin_authorization(
+    state: State<'_, DesktopState>,
+    server_url: String,
+    client_id: String,
+) -> Result<AuthorizationRequest> {
+    let parsed = url::Url::parse(server_url.trim_end_matches('/'))
+        .map_err(|e| DesktopError::Rejected(e.to_string()))?;
+    if !is_allowed_http_url(&parsed) {
+        return Err(DesktopError::Rejected(
+            "server URL must be https (or http on loopback)".into(),
+        ));
+    }
+    let pkce = auth::new_pkce();
+    let authorize = auth::authorize_url(parsed.as_str(), &pkce, &client_id);
+    let state_param = pkce.state.clone();
+    *state.pending_pkce.lock().unwrap_or_else(|p| p.into_inner()) = Some(pkce);
+    Ok(AuthorizationRequest {
+        url: authorize,
+        state: state_param,
+    })
+}
+
 /// Report the current connection state to the renderer and persist it
 /// in desktop state so the tray menu can reflect it.
 #[tauri::command]
 pub fn report_connection(
-    state: DesktopState,
+    state: State<'_, DesktopState>,
     status: ConnectionState,
     app: AppHandle,
 ) -> Result<()> {
-    state.connection_state = status.clone();
+    *state
+        .connection_state
+        .lock()
+        .unwrap_or_else(|p| p.into_inner()) = status.clone();
     let _ = app.emit("connection-state", &status);
     if let Some(window) = app.get_webview_window("main") {
         let label = match &status {
@@ -127,19 +176,23 @@ pub fn report_connection(
 
 /// Tunnel a server-sent run update to the renderer so the UI can classify it.
 #[tauri::command]
-pub fn push_run_update(state: DesktopState, run_id: String, status: String) -> Result<()> {
+pub fn push_run_update(
+    state: State<'_, DesktopState>,
+    run_id: String,
+    status: String,
+) -> Result<()> {
     let _ = state;
     let _ = run_id;
     let _ = status;
-    // The Rust layer keeps this bridge intentionally thin: the renderer polls or
-    // reconnects the server SSE and only calls these helpers when it has already
-    // classified a real server response. There is no generic event passthrough here.
+    // The Rust layer keeps this bridge intentionally thin: the renderer polls
+    // the server and only calls these helpers when it has already classified a
+    // real server response. There is no generic event passthrough here.
     Ok(())
 }
 
 /// Ask the renderer to set the tray menu connection label.
 #[tauri::command]
-pub fn update_tray_state_label(state: DesktopState, label: String) -> Result<()> {
+pub fn update_tray_state_label(state: State<'_, DesktopState>, label: String) -> Result<()> {
     let _ = state;
     let _ = label;
     // The menu label is updated through an event so the renderer does not need
@@ -151,46 +204,84 @@ pub fn update_tray_state_label(state: DesktopState, label: String) -> Result<()>
 /// comes back through the `tracehealer://auth/callback` deep link.
 #[tauri::command]
 pub fn open_authorize_url(redirect_url: String) -> Result<()> {
-    open::that(&redirect_url).map_err(|e| DesktopError::Http(e.to_string()))?;
+    let parsed =
+        url::Url::parse(&redirect_url).map_err(|e| DesktopError::Rejected(e.to_string()))?;
+    if !is_allowed_http_url(&parsed) {
+        return Err(DesktopError::Rejected(
+            "authorization URL must be https (or http on loopback)".into(),
+        ));
+    }
+    open::that(parsed.as_str()).map_err(|e| DesktopError::Http(e.to_string()))?;
     Ok(())
 }
 
-/// Handle a `tracehealer://auth/callback` deep link.
+/// Handle a `tracehealer://auth/callback` deep link. The pending PKCE state
+/// is validated in constant time and consumed exactly once, so a captured
+/// callback URL can never be replayed.
 #[tauri::command]
-pub fn handle_callback(state: DesktopState, url: String, app: AppHandle) -> Result<CallbackResult> {
+pub fn handle_callback(
+    state: State<'_, DesktopState>,
+    url: String,
+    app: AppHandle,
+) -> Result<CallbackResult> {
+    let pending = state
+        .pending_pkce
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone()
+        .ok_or_else(|| DesktopError::Rejected("no authorization in progress".into()))?;
     let parsed = url::Url::parse(&url).map_err(|e| DesktopError::Rejected(e.to_string()))?;
-    let code = auth::validate_callback(&parsed, &state.connection_state.server_url)
-        .map_err(|e| DesktopError::Auth(e))?;
+    let code = auth::validate_callback(&parsed, &pending.state)?;
+    // Success consumes the attempt; the state itself is already one-time.
+    *state.pending_pkce.lock().unwrap_or_else(|p| p.into_inner()) = None;
     let _ = app.emit("auth-callback", &code);
-    Ok(CallbackResult { kind: "code".into() })
+    Ok(CallbackResult {
+        kind: "code".into(),
+    })
 }
 
-/// Handle a `tracehealer://incident/:id` or `tracehealer://run/:id` deep link.
-#[tauri::command]
-pub fn handle_deep_link(state: DesktopState, url: String, app: AppHandle) -> Result<DeepLinkTarget> {
-    let parsed = url::Url::parse(&url).map_err(|e| DesktopError::Rejected(e.to_string()))?;
+/// Parse a `tracehealer://incident/:id` or `tracehealer://run/:id` deep link.
+/// Pure so tests never need a live Tauri app.
+pub fn parse_deep_link(url: &str) -> Result<DeepLinkTarget, DesktopError> {
+    let parsed = url::Url::parse(url).map_err(|e| DesktopError::Rejected(e.to_string()))?;
     if parsed.scheme() != "tracehealer" {
-        return Err(DesktopError::Rejected("unsupported deep-link scheme".into()));
+        return Err(DesktopError::Rejected(
+            "unsupported deep-link scheme".into(),
+        ));
     }
-    let path = parsed.host().unwrap_or("").to_string() + parsed.path().trim_start_matches('/');
+    let kind = parsed.host_str().unwrap_or("").to_string();
     let id = parsed
         .path()
         .trim_start_matches('/')
         .split('/')
-        .last()
+        .next()
         .unwrap_or("")
         .to_string();
-    let target = match path.as_str() {
-        "incident" => DeepLinkTarget {
-            kind: "incident".into(),
-            id,
-        },
-        "run" => DeepLinkTarget {
-            kind: "run".into(),
-            id,
-        },
-        _ => return Err(DesktopError::Rejected(format!("unknown deep-link target: {path}"))),
-    };
+    match kind.as_str() {
+        "incident" | "run"
+            if !id.is_empty()
+                && id.len() <= 80
+                && id
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') =>
+        {
+            Ok(DeepLinkTarget { kind, id })
+        }
+        _ => Err(DesktopError::Rejected(format!(
+            "unknown deep-link target: {url}"
+        ))),
+    }
+}
+
+/// Handle a `tracehealer://incident/:id` or `tracehealer://run/:id` deep link.
+#[tauri::command]
+pub fn handle_deep_link(
+    state: State<'_, DesktopState>,
+    url: String,
+    app: AppHandle,
+) -> Result<DeepLinkTarget> {
+    let _ = &state;
+    let target = parse_deep_link(&url)?;
     let _ = app.emit("deep-link", &target);
     Ok(target)
 }
@@ -199,33 +290,45 @@ pub fn handle_deep_link(state: DesktopState, url: String, app: AppHandle) -> Res
 #[tauri::command]
 pub fn request_notification_permission() -> Result<bool> {
     Ok(false)
-    // The real permission request goes through tauri-plugin-notification from the
-    // renderer. This command is a placeholder so the button is never dead.
+    // The real permission request goes through tauri-plugin-notification from
+    // the renderer. This command is a placeholder so the button is never dead.
 }
 
 /// Toggle whether the desktop client sends native notifications.
 #[tauri::command]
-pub fn set_notifications_allowed(state: DesktopState, allowed: bool) -> Result<()> {
-    state.notifications_allowed = allowed;
-    let _ = state;
+pub fn set_notifications_allowed(state: State<'_, DesktopState>, allowed: bool) -> Result<()> {
+    *state
+        .notifications_allowed
+        .lock()
+        .unwrap_or_else(|p| p.into_inner()) = allowed;
     Ok(())
 }
 
 /// Return the current notification opt-out setting.
 #[tauri::command]
-pub fn notifications_allowed(state: &DesktopState) -> bool {
-    state.notifications_allowed
+pub fn notifications_allowed(state: State<'_, DesktopState>) -> bool {
+    *state
+        .notifications_allowed
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
 }
 
 /// Read the current server + workspace settings from the OS-vaulted desktop store.
 #[tauri::command]
-pub fn get_settings(state: &DesktopState) -> SettingsView {
+pub fn get_settings(state: State<'_, DesktopState>) -> SettingsView {
     SettingsView {
-        connection_state: state.connection_state.clone(),
-        notifications_allowed: state.notifications_allowed,
-        // Server URL, workspace, update channel, and appearance are surfaced from
-        // the same store the renderer writes to; this command only mirrors a
-        // read-only summary.
+        connection_state: state
+            .connection_state
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone(),
+        notifications_allowed: *state
+            .notifications_allowed
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()),
+        // Server URL, workspace, update channel, and appearance are surfaced
+        // from the same store the renderer writes to; this command only
+        // mirrors a read-only summary.
         server_url: String::new(),
         workspace_id: String::new(),
         update_channel: "stable".into(),
@@ -278,6 +381,12 @@ pub struct SessionBody {
     pub role: String,
     pub session_token: String,
     pub expires_at: i64,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct AuthorizationRequest {
+    pub url: String,
+    pub state: String,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -351,15 +460,44 @@ mod tests {
 
     #[test]
     fn deep_link_unknown_target_is_rejected() {
-        let app = tauri::AppHandle::default();
-        let state = DesktopState::default();
-        let result = handle_deep_link(
-            state,
-            "tracehealer://shell/delete-everything".into(),
-            app,
-        );
-        assert!(result.is_err());
-        assert!(matches!(result, Err(DesktopError::Rejected(_))));
+        for url in [
+            "tracehealer://shell/delete-everything",
+            "tracehealer://incident/",
+            "tracehealer://incident/..%2Fescape",
+            "https://evil.example/run/heal_1",
+        ] {
+            let result = parse_deep_link(url);
+            assert!(result.is_err(), "expected rejection for {url}");
+        }
+    }
+
+    #[test]
+    fn deep_link_accepts_incident_and_run_ids() {
+        let incident = parse_deep_link("tracehealer://incident/inc-42").unwrap();
+        assert_eq!(incident.kind, "incident");
+        assert_eq!(incident.id, "inc-42");
+        let run = parse_deep_link("tracehealer://run/heal_69977a13").unwrap();
+        assert_eq!(run.kind, "run");
+        assert_eq!(run.id, "heal_69977a13");
+    }
+
+    #[test]
+    fn authorize_url_open_is_restricted_to_https_and_loopback() {
+        assert!(is_allowed_http_url(
+            &url::Url::parse("https://healer.example/auth").unwrap()
+        ));
+        assert!(is_allowed_http_url(
+            &url::Url::parse("http://localhost:3000/auth").unwrap()
+        ));
+        assert!(!is_allowed_http_url(
+            &url::Url::parse("http://healer.example/auth").unwrap()
+        ));
+        assert!(!is_allowed_http_url(
+            &url::Url::parse("file:///etc/passwd").unwrap()
+        ));
+        assert!(!is_allowed_http_url(
+            &url::Url::parse("javascript:alert(1)").unwrap()
+        ));
     }
 
     #[test]
