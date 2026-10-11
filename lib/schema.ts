@@ -35,9 +35,23 @@ export const agentTraceSchema = z.object({
   metadata: z.record(z.string(), z.unknown()).optional(),
 });
 
-export const healRequestSchema = z.object({
-  trace: agentTraceSchema.optional(),
-  mode: z.enum(["demo", "connected"]).default("demo"),
-  /** Optional caller-supplied key so retries reuse a run instead of mutating twice. */
-  idempotencyKey: z.string().min(8).max(200).optional(),
-});
+/**
+ * Public mutation contract for starting a healing run.
+ *
+ * `mode` is required on purpose: an empty body must never silently launch the
+ * seeded demo, and connected mode must always carry a real trace. Callers send
+ * either `{"mode":"demo"}` or `{"mode":"connected","trace":{...}}`.
+ */
+export const healRequestSchema = z
+  .object({
+    trace: agentTraceSchema.optional(),
+    mode: z.enum(["demo", "connected"]),
+    /** Optional caller-supplied key so retries reuse a run instead of mutating twice. */
+    idempotencyKey: z.string().min(8).max(200).optional(),
+  })
+  .refine((value) => value.mode === "demo" || value.trace !== undefined, {
+    message: "A connected run requires a valid trace payload",
+    path: ["trace"],
+  });
+
+export type HealRequest = z.infer<typeof healRequestSchema>;

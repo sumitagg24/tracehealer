@@ -58,6 +58,25 @@ export function isTerminal(state: RunState): boolean {
   return TERMINAL_STATES.has(state);
 }
 
+/**
+ * States a coordinator-owned cancellation may replace.
+ *
+ * Cancellation is authoritative for work that never produced a verified repair:
+ * it may replace an in-flight state and the `needs-review` verdict a pipeline
+ * writes when it observes the abort mid-flight. It must never rewrite a verified
+ * `healed` run, a `delivery-failed` one whose verification result is preserved
+ * for retry, or an already-decided `timed-out` run.
+ */
+export const CANCELLABLE_STATES: ReadonlySet<RunState> = new Set<RunState>([
+  ...ACTIVE_STATES,
+  "needs-review",
+  "cancelled",
+]);
+
+export function canCancel(state: RunState): boolean {
+  return CANCELLABLE_STATES.has(state);
+}
+
 export function canTransition(from: RunState, to: RunState): boolean {
   return TRANSITIONS[from].includes(to);
 }

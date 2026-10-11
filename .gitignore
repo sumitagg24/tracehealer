@@ -15,8 +15,18 @@ dist/
 .env.*.local
 .tracehealer-data/
 
+# agent/tooling state
+.freebuff/
+
+# Rust build output (apps/desktop)
+apps/desktop/src-tauri/target/
+
 # tests
 coverage/
+.tracehealer-e2e-local/
+.tracehealer-e2e-session/
+test-results/
+playwright-report/
 
 # system / editors
 .DS_Store

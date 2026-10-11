@@ -56,4 +56,15 @@ describe("security policy", () => {
     expect(() => loadPolicy(env({ TRACEHEALER_MAX_OUTPUT_BYTES: "abc" }))).toThrow(TraceHealerError);
     expect(() => loadPolicy(env({ TRACEHEALER_COMMAND_TIMEOUT_MS: "5000" }))).not.toThrow();
   });
+
+  it("rejects an unknown sandbox provider instead of silently downgrading", () => {
+    const env = (value: Record<string, string>) => value as unknown as NodeJS.ProcessEnv;
+    // A typo must not quietly select the in-process sandbox.
+    expect(() => loadPolicy(env({ TRACEHEALER_SANDBOX_PROVIDER: "dkr" }))).toThrow(/must be one of/);
+    expect(loadPolicy(env({ TRACEHEALER_SANDBOX_PROVIDER: "docker" })).sandboxProvider).toBe("docker");
+    expect(loadPolicy(env({ TRACEHEALER_SANDBOX_PROVIDER: "local-process" })).sandboxProvider).toBe(
+      "local-process",
+    );
+    expect(loadPolicy(env({})).sandboxProvider).toBe("local-process");
+  });
 });

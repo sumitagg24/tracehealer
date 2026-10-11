@@ -34,7 +34,7 @@ export function assertSameOrigin(request: Request): void {
   try {
     originHost = new URL(origin).host;
   } catch {
-    throw new TraceHealerError("policy-rejected", "Cross-origin request rejected");
+    throw new TraceHealerError("invalid-origin", "Cross-origin request rejected", { status: 403 });
   }
   const allowed = new Set<string>();
   const host = request.headers.get("host");
@@ -48,7 +48,7 @@ export function assertSameOrigin(request: Request): void {
     }
   }
   if (!allowed.has(originHost)) {
-    throw new TraceHealerError("policy-rejected", "Cross-origin request rejected", { status: 403 });
+    throw new TraceHealerError("invalid-origin", "Cross-origin request rejected", { status: 403 });
   }
 }
 
@@ -64,11 +64,11 @@ export async function readBoundedText(request: Request): Promise<string> {
   const declared = Number(request.headers.get("content-length") ?? Number.NaN);
   const limit = maxBodyBytes();
   if (Number.isFinite(declared) && declared > limit) {
-    throw new TraceHealerError("invalid-input", "Request body exceeds the size limit");
+    throw new TraceHealerError("payload-too-large", "Request body exceeds the size limit");
   }
   const body = await request.text();
   if (Buffer.byteLength(body, "utf8") > limit) {
-    throw new TraceHealerError("invalid-input", "Request body exceeds the size limit");
+    throw new TraceHealerError("payload-too-large", "Request body exceeds the size limit");
   }
   return body;
 }

@@ -1,10 +1,12 @@
 import { buildLocalContextGraph, type RepositoryContext } from "@/lib/context";
+import { TraceHealerError } from "@/lib/errors";
 import { publishDraftPullRequest, type PullRequestInput, type PullRequestResult } from "@/lib/github";
 import { exportHealedTrace, notifySlack } from "@/lib/integrations";
 import { executeDemoSandbox, type SandboxResult } from "@/lib/sandbox";
 import { deterministicStrategy } from "@/lib/strategies";
 import {
   appendRunEvent,
+  cancelRunSummary,
   findRunByIdempotencyKey,
   getHealingRun,
   getRunSummary,
@@ -15,6 +17,7 @@ import {
   saveRunSummary,
   updateRunState,
 } from "@/lib/store";
+import { loadPolicy } from "@/lib/policy";
 import { normalizeTracePayload } from "@/lib/trace-normalizer";
 import type { AgentTrace, AuditEvent, Diagnosis, HealResult, RunState, RunSummary } from "@/lib/types";
 
@@ -52,6 +55,12 @@ export interface SandboxRunInput {
   workspaceId: string;
   proposal: PatchProposal;
   dataRoot?: string;
+  /**
+   * Cancellation signal owned by the run coordinator. A provider that can abort
+   * in-flight work (kill a child process, stop a container) must observe it and
+   * return or throw promptly so cancellation propagates through the boundary.
+   */
+  signal?: AbortSignal;
 }
 
 export interface SandboxProvider {
@@ -67,6 +76,12 @@ export interface RunStore {
   getSummary(id: string): Promise<RunSummary | null>;
   listSummaries(limit?: number): Promise<RunSummary[]>;
   updateState(id: string, state: RunState, completedAt?: string | null): Promise<RunSummary | null>;
+  /**
+   * Record an authoritative human cancellation. Unlike `updateState`, it may
+   * replace a non-verified terminal verdict (the `needs-review` a pipeline writes
+   * after observing the abort) but never a verified or already-decided run.
+   */
+  cancelRun(id: string, completedAt?: string): Promise<RunSummary | null>;
   appendEvent(runId: string, event: AuditEvent): Promise<void>;
   readEvents(runId: string): Promise<AuditEvent[]>;
   findByIdempotencyKey(key: string): Promise<RunSummary | null>;
@@ -118,9 +133,30 @@ export const localGraphContextProvider: RepositoryContextProvider = {
 
 export const localProcessSandbox: SandboxProvider = {
   id: "local-process",
-  run: ({ trace, workspaceId, proposal, dataRoot }) =>
-    executeDemoSandbox(trace, { workspaceId, dataRoot, proposal }),
+  run: ({ trace, workspaceId, proposal, dataRoot, signal }) =>
+    executeDemoSandbox(trace, { workspaceId, dataRoot, proposal, signal }),
 };
+
+/**
+ * Choose the sandbox provider requested by policy.
+ *
+ * `TRACEHEALER_SANDBOX_PROVIDER=docker` has no runtime binding yet: the container
+ * provider (`lib/container-sandbox.ts`) builds the hardened `docker run`
+ * arguments, declares its guarantees, and is proven by a live isolation test,
+ * but the pipeline still executes the trusted fixture in-process. Requesting it
+ * therefore fails closed instead of silently downgrading to the in-process
+ * sandbox, which is the fall-back the container documentation promises never to
+ * make.
+ */
+export function selectSandboxProvider(policy = loadPolicy()): SandboxProvider {
+  if (policy.sandboxProvider === "docker") {
+    throw new TraceHealerError(
+      "unconfigured",
+      "TRACEHEALER_SANDBOX_PROVIDER=docker is not wired to the pipeline yet; unset it to run the in-process sandbox",
+    );
+  }
+  return localProcessSandbox;
+}
 
 export const filesystemRunStore: RunStore = {
   saveRun: saveHealingRun,
@@ -130,6 +166,7 @@ export const filesystemRunStore: RunStore = {
   getSummary: getRunSummary,
   listSummaries: listRunSummaries,
   updateState: updateRunState,
+  cancelRun: cancelRunSummary,
   appendEvent: appendRunEvent,
   readEvents: readRunEvents,
   findByIdempotencyKey: findRunByIdempotencyKey,
@@ -159,7 +196,9 @@ export function createPipelineDeps(overrides: Partial<PipelineDeps> = {}): Pipel
   return {
     contextProvider: localGraphContextProvider,
     patchStrategy: deterministicStrategy,
-    sandbox: localProcessSandbox,
+    // An explicitly injected provider (including a container-backed one) always
+    // wins; selection only refuses when the default would silently downgrade.
+    sandbox: overrides.sandbox ?? selectSandboxProvider(),
     runStore: filesystemRunStore,
     pullRequest: githubPullRequestProvider,
     notifications: defaultNotificationProvider,

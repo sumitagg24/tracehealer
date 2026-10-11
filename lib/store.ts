@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { appendFile, mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { canCancel, isTerminal } from "@/lib/run-state";
 import type { AuditEvent, HealResult, Incident, RunState, RunSummary } from "@/lib/types";
 
 function root() {
@@ -43,13 +44,17 @@ async function renameWithRetry(from: string, to: string) {
   }
 }
 
+/** Assumes the caller already holds the file lock for `file`. */
+async function writeJsonUnlocked(file: string, value: unknown) {
+  await mkdir(path.dirname(file), { recursive: true });
+  const temporary = `${file}.${randomUUID()}.tmp`;
+  await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+  await renameWithRetry(temporary, file);
+}
+
 async function atomicJson(file: string, value: unknown) {
   await mkdir(path.dirname(file), { recursive: true });
-  await withFileLock(file, async () => {
-    const temporary = `${file}.${randomUUID()}.tmp`;
-    await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, "utf8");
-    await renameWithRetry(temporary, file);
-  });
+  await withFileLock(file, () => writeJsonUnlocked(file, value));
 }
 
 async function readJson<T>(file: string): Promise<T | null> {
@@ -85,9 +90,26 @@ export async function listHealingRuns(limit = 25): Promise<HealResult[]> {
   }
 }
 
-/** Persist a lightweight, secret-free projection for in-progress and finished runs. */
+/**
+ * Persist a lightweight, secret-free projection for in-progress and finished runs.
+ *
+ * This is the single enforcement point for run finality: once a summary reached a
+ * terminal state, a later write may only restate that same state. Without this a
+ * cancellation could be overwritten by a verification step that was already in
+ * flight.
+ */
 export async function saveRunSummary(summary: RunSummary) {
-  await atomicJson(path.join(root(), "summaries", `${summary.id}.json`), summary);
+  if (!isSafeId(summary.id)) throw new Error("Unsafe run id");
+  const file = path.join(root(), "summaries", `${summary.id}.json`);
+  // The read-check-write runs under the per-file lock, so two concurrent writers
+  // cannot both observe a pre-terminal state and then overwrite each other.
+  await withFileLock(file, async () => {
+    const existing = await readJson<RunSummary>(file);
+    if (existing && existing.state !== summary.state && isTerminal(existing.state)) {
+      return;
+    }
+    await writeJsonUnlocked(file, summary);
+  });
 }
 
 export async function getRunSummary(id: string): Promise<RunSummary | null> {
@@ -111,9 +133,40 @@ export async function listRunSummaries(limit = 25): Promise<RunSummary[]> {
   }
 }
 
+/**
+ * Record an authoritative human cancellation.
+ *
+ * `saveRunSummary` refuses any write that contradicts a terminal state, which is
+ * what protects a finalized run. Cancellation needs exactly one documented
+ * exception: a pipeline that observes the abort can write the terminal
+ * `needs-review` verdict *before* the coordinator records the cancel, so the
+ * coordinator must still be able to replace that non-verified verdict. Verified
+ * and already-decided runs stay untouched (see `canCancel`).
+ */
+export async function cancelRunSummary(
+  id: string,
+  completedAt: string,
+): Promise<RunSummary | null> {
+  if (!isSafeId(id)) return null;
+  const file = path.join(root(), "summaries", `${id}.json`);
+  return withFileLock(file, async () => {
+    const existing = await readJson<RunSummary>(file);
+    if (!existing) return null;
+    // Repeating a cancellation is a no-op so the original timestamp is kept.
+    if (existing.state === "cancelled") return existing;
+    if (!canCancel(existing.state)) return existing;
+    const cancelled: RunSummary = { ...existing, state: "cancelled", completedAt };
+    await writeJsonUnlocked(file, cancelled);
+    return cancelled;
+  });
+}
+
 export async function updateRunState(id: string, state: RunState, completedAt: string | null = null) {
   const summary = await getRunSummary(id);
   if (!summary) return null;
+  // A settled terminal run is final: a late progress write (for example a
+  // verification step arriving after a cancel) must never resurrect it.
+  if (summary.state !== state && isTerminal(summary.state)) return summary;
   const updated: RunSummary = { ...summary, state, completedAt: completedAt ?? summary.completedAt };
   await saveRunSummary(updated);
   return updated;

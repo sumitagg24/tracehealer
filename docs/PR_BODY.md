@@ -57,7 +57,20 @@ scattered environment checks.
 - Security: origin/CSRF, size, rate limit, webhook replay, redaction, CSP
 - Liveness/readiness/metrics endpoints; async runs + progress polling
 - Rebuilt operations console with run detail and all lifecycle states
-- Expanded test suite (12 files, 47 tests) including adversarial patch cases
+- Authenticated workspace: roles (`viewer`/`operator`/`admin`), tenant-scoped
+  reads and writes, fail-closed production auth, and sign-in/unauthorized/
+  expired-session surfaces
+- Durable distributed adapter (sqlite): runs, transitions, audit events,
+  idempotency, webhook replay, queue, rate limit, artifacts
+- Notifications and outcome reporting (`/api/report`, plus an in-app notification
+  feed derived from persisted runs — no fabricated values)
+- Hardened container sandbox provider with a live isolation proof, and a
+  fail-closed selection guard so `TRACEHEALER_SANDBOX_PROVIDER=docker` can never
+  silently downgrade to the in-process sandbox
+- Tauri 2 desktop client (tray, notifications, deep links, OS-keychain session
+  vault) with its own policy tests and a windows/macos/linux CI matrix
+- Expanded test suite (27 files, 172 tests) including adversarial patch cases and
+  a 13-case Playwright browser suite
 
 ## API / UI changes
 
@@ -72,14 +85,30 @@ scattered environment checks.
 
 ## Test evidence
 
-- `npm run typecheck`, `npm run lint`, `npm test` (47 tests), `npm run build`
-  all pass; `npm audit --omit=dev` reports `found 0 vulnerabilities`.
+- `npm run typecheck` (0 errors), `npm run lint` (0 findings), `npm test`
+  (**27 files, 172 tests**, 0 failures — repeated 4× with no flake), and
+  `npm run build` (19 routes) all pass; `npm audit --omit=dev` reports
+  `found 0 vulnerabilities`.
+- **Clean-clone audit.** The same gates were re-run from a literal fresh clone of
+  this branch (no warm `node_modules`, no `.env`, no build output): typecheck,
+  lint, 172 unit tests, build, and the browser suite all passed there too.
+- **Browser E2E (Playwright).** `npm run test:e2e` builds once and runs two
+  servers from that build — a local-development-auth server and a
+  session+sqlite server — covering live progress, run detail, unsupported
+  failures staying `needs-review`, cancellation, notifications, the report
+  endpoint, 401/expired-session surfaces, responsive breakpoints, accessible
+  names, role separation, and tenant-scoped artifact access: **13 passed**.
+- **Docker packaging.** The real image was built and run: healthcheck `healthy`,
+  non-root `uid=1001`, `/api/health` and `/api/ready` 200, a real demo heal inside
+  the container (`healed`, before exit 1 → after exit 0, local commit), and the
+  run still readable after `docker compose restart`.
+- **Container isolation.** A live test builds `docker/sandbox.Dockerfile` and runs
+  the attack probes against real containers (no network, read-only root, non-root,
+  no credential forwarding, no Docker socket).
 - Full heal smoke: before exit `1` → after exit `0`, 4/4 checks, local commit,
   artifacts readable, no absolute paths in logs.
-- Browser: server-driven states observed live (Diagnosing → Verifying →
-  Healed); run detail, artifact links, and the unconfigured publish message
-  verified; widths 390/768/1024/1440 without overflow.
-- See `docs/RELEASE_EVIDENCE.md` for commands and outputs.
+- See `docs/RELEASE_EVIDENCE.md` for commands and verbatim outputs, and
+  `docs/IMPLEMENTATION_STATUS.md` for the per-capability verified/blocked matrix.
 
 ## Migration / deployment notes
 
@@ -96,8 +125,14 @@ scattered environment checks.
   target repository.
 - **Slack**: webhook URL.
 - **Model strategy**: provider key plus `TRACEHEALER_ALLOW_MODEL_PATCHES=true`.
-- **Container isolation** for untrusted customer repositories (not implemented;
-  the sandbox runs the trusted fixture in-process).
+- **Container isolation for untrusted repositories.** The hardened provider and
+  its live isolation proof exist, but it is **not bound to the pipeline yet**:
+  `TRACEHEALER_SANDBOX_PROVIDER=docker` fails closed with `503 unconfigured`
+  rather than downgrading, and the default pipeline still runs the trusted
+  fixture in-process.
+- **Desktop signing/notarization.** Windows/macOS/Linux installers are produced by
+  the `desktop` workflow as **unsigned test builds** until signing credentials and
+  (for macOS) notarization are configured.
 
 ## No-auto-merge guarantee
 

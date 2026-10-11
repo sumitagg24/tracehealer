@@ -156,7 +156,8 @@ describe("run coordinator", () => {
     const d = await deps({ sandbox: sandboxFrom(async () => { await new Promise((r) => setTimeout(r, 200)); return passedSandbox(); }) });
     const started = await startHealingRun({ trace: DEMO_TRACE, mode: "demo", deps: d });
     await cancelHealingRun(started.runId);
-    await new Promise((r) => setTimeout(r, 400));
+    // Wait for the coordinator to actually settle instead of guessing a delay.
+    await awaitHealingRun(started.runId);
     const summary = await getRunSummary(started.runId);
     expect(summary?.state).toBe("cancelled");
   }, 10_000);
@@ -164,7 +165,7 @@ describe("run coordinator", () => {
   it("times out a slow run", async () => {
     const d = await deps({ sandbox: sandboxFrom(async () => { await new Promise((r) => setTimeout(r, 250)); return passedSandbox(); }) });
     const started = await startHealingRun({ trace: DEMO_TRACE, mode: "demo", deps: d, timeoutMs: 50 });
-    await new Promise((r) => setTimeout(r, 500));
+    await awaitHealingRun(started.runId);
     const summary = await getRunSummary(started.runId);
     expect(summary?.state).toBe("timed-out");
   }, 10_000);

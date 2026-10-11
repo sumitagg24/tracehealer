@@ -1,10 +1,14 @@
 # TraceHealer release evidence
 
-Environment: Windows 11, Node v22.23.2, npm 10.9.8, Next.js 16.4.0.
-Branch: `feat/tracehealer-full-flow`. Date: 2026-10-10.
+Environment: Windows 11, Node v22.23.2, npm 10.9.8, Next.js 16.4.0, Docker 29.8.0.
+Branch: `feat/tracehealer-production-completion`. Date: 2026-10-11.
 
 All commands below were run from the repository root. No secrets are included;
 integration status is reported as booleans only.
+
+> The unit-suite counts in the early sections below are the historical Prompt
+> 1/2/3 measurements. The current, authoritative gate counts are in **Clean-clone
+> audit** and **Static and unit verification (current)** at the end of this file.
 
 ## Static and unit verification
 
@@ -12,7 +16,7 @@ integration status is reported as booleans only.
 |---|---|
 | `npm run typecheck` | pass (0 errors) |
 | `npm run lint` | pass (0 errors, 0 warnings) |
-| `npm test` | pass — 12 files, 47 tests |
+| `npm test` | pass — 12 files, 47 tests (Prompt 1/2/3 baseline) |
 | `npm run build` | pass — Next.js standalone build; 15 routes compiled |
 | `npm audit --omit=dev` | pass — `found 0 vulnerabilities` |
 
@@ -58,8 +62,12 @@ artifacts none
 
 | Case | Result |
 |---|---|
-| `POST /api/runs` with `Origin: https://evil.example` | `403` |
-| `POST /api/runs` with `Content-Type: text/plain` | `400` |
+| `POST /api/runs` with `Origin: https://evil.example` | `403 invalid-origin` |
+| `POST /api/runs` with `Content-Type: text/plain` | `400 invalid-input` |
+| `POST /api/runs` with `{}` (no explicit mode) | `400 invalid-input` |
+| `POST /api/runs` with malformed JSON | `400 invalid-input` |
+| `POST /api/runs` with an oversized body | `413 payload-too-large` |
+| `GET /api/readiness` | identical status/payload/headers to `/api/ready` |
 | `GET /api/artifacts/../../package.json/patch` | `404` |
 | `POST /api/runs/:id/publish` (GitHub unconfigured) | `503 unconfigured` |
 | Webhook native `trace.failed` | `202` |
@@ -107,9 +115,76 @@ The control center was driven in a real browser:
 
 ## Docker
 
-The `Dockerfile` and `compose.yaml` are unchanged and CI builds the app, but
-Docker was **not** available in this environment, so container build, non-root
-runtime, healthcheck, and restart/persistence were not executed here.
+Not executed in the earlier session (Docker was unavailable). Executed for real
+on 2026-10-11 — see **Docker packaging proof** below.
+
+## Prompt 2 — authentication and tenant authorization
+
+Contract tests (`lib/auth.test.ts`, 11 cases):
+
+```
+local mode grants an admin principal with every capability
+production runtime + local mode without acknowledgement -> 503 unconfigured
+production runtime + TRACEHEALER_LOCAL_AUTH_ACK=true -> allowed
+session mode without TRACEHEALER_SESSION_SECRET -> 503 unconfigured
+session mode without a cookie -> 401 unauthorized
+operator cookie: run:create allowed, policy:write forbidden (403)
+viewer cookie: run:read allowed, run:create forbidden (403)
+expired token -> 401 unauthorized
+tampered signature -> rejected
+cross-tenant tenantId -> 404 not-found
+cookie-authenticated mutation with Origin: https://evil.example -> 403 invalid-origin
+```
+
+HTTP evidence. The standalone production build was started with
+`TRACEHEALER_AUTH_MODE=session`, a `TRACEHEALER_SESSION_SECRET`, and a throwaway
+`TRACEHEALER_DATA_DIR`. Session cookies were minted with the same HMAC scheme as
+`lib/auth.ts` and the responses below are copied from that server:
+
+```
+GET  /api/runs  (no cookie)                        -> 401 {"code":"unauthorized","error":"Authentication required"}
+GET  /api/runs  (expired cookie)                   -> 401 {"code":"unauthorized","error":"Authentication required"}
+GET  /api/runs  (operator cookie)                  -> 200 {"ok":true,"runs":[],"count":0}
+GET  /api/runs  (viewer cookie)                    -> 200 {"ok":true,"runs":[],"count":0}
+POST /api/runs  (viewer cookie, mode demo)         -> 403 {"code":"forbidden","error":"Your role does not permit this action"}
+POST /api/runs  (operator cookie, foreign Origin)  -> 403 {"code":"invalid-origin","error":"Cross-origin request rejected"}
+```
+
+Same server, operator cookie, Prompt 1 request contract over real HTTP:
+
+```
+POST /api/runs {}                                  -> 400 {"code":"invalid-input","error":"Invalid run payload"}
+POST /api/runs {oops                               -> 400 {"code":"invalid-input","error":"Request body is not valid JSON"}
+POST /api/runs {"mode":"connected","trace":{"bad":true}} -> 400 {"code":"invalid-input","error":"Invalid run payload"}
+POST /api/runs Content-Type: text/plain            -> 400 {"code":"invalid-input","error":"Expected an application/json request body"}
+POST /api/runs 600 kB body                         -> 413 {"code":"payload-too-large","error":"Request body exceeds the size limit"}
+POST /api/runs {"mode":"demo"}                     -> 202 {"runId":"heal_5c6c3562","state":"queued"}
+```
+
+That 202 run finished for real through the authenticated API:
+
+```
+GET /api/runs/heal_5c6c3562/progress
+  result.state              healed
+  verification.passed       true
+  checks                    4/4 passed
+  beforeTestExitCode        1   (TAP: # fail 3)
+  afterTestExitCode         0   (TAP: # pass 4)
+  artifacts.localCommit     2f344d0
+  delivery                  github/neatlogs/slack = not-configured
+```
+
+Readiness alias equivalence, measured on the same server:
+
+```
+GET /api/ready     -> HTTP/1.1 200 | Cache-Control: no-store | content-type: application/json
+GET /api/readiness -> HTTP/1.1 200 | Cache-Control: no-store | content-type: application/json
+bodies identical after removing the volatile timestamp field: true
+```
+
+Not claimed: no external identity provider (OIDC/SAML) was configured or called,
+so no live third-party login is verified. The provider boundary, the local
+principal, and HMAC session validation are implemented and tested.
 
 ## External blockers (not claimed as verified)
 
@@ -142,6 +217,146 @@ prints a standalone warning (use `node .next/standalone/server.js`); and the
 readiness route is `/api/ready` (not `/api/readiness`). Dev-only `npm audit`
 highs are the `eslint-config-next` → `@next/eslint-plugin-next` → `fast-glob` →
 `micromatch` → `braces` chain with no production impact.
+
+## Browser E2E (Playwright, production build)
+
+`npm run test:e2e` builds the app and starts two servers from that one build,
+both bound to loopback:
+
+- port 3188 — `TRACEHEALER_AUTH_MODE=local` with the documented
+  `TRACEHEALER_LOCAL_AUTH_ACK=true` acknowledgement (NODE_ENV=production);
+- port 3189 — `TRACEHEALER_AUTH_MODE=session` with the durable
+  `TRACEHEALER_STORE=sqlite` adapter, which is the mode that enforces tenant
+  isolation.
+
+Result: **13 passed (26.4s)**, file `e2e/tracehealer.spec.ts`.
+
+| Scenario | Result |
+|---|---|
+| local development auth: control center loads without a session | pass |
+| explicit demo heal: live progress, cancel affordance, healed card, ALL CHECKS PASSED, `before exit 1 → after exit 0` | pass |
+| run detail: timeline, context, checks, metrics, delivery, artifact content types | pass |
+| unsupported (timeout) failure settles `needs-review`, never a fabricated fix | pass |
+| active cancellation settles `cancelled` with no resurrection | pass |
+| notification popover lists persisted runs, Escape closes and restores focus | pass |
+| `/api/report` defaults: estimate disabled, no fabricated money/time, ≤5 recent runs, no sponsor links | pass |
+| unauthenticated 401 responses render the sign-in surface (not an offline banner) | pass |
+| a session rejected mid-use renders the expired-session surface | pass |
+| no horizontal overflow at 1440/1024/768/390 px | pass |
+| every disabled control has an explanation and every control has an accessible name | pass |
+| session server fails closed (401) and enforces role separation (viewer POST → 403) | pass |
+| artifact download: anonymous → 401, matching tenant → 200, foreign tenant → 404 | pass |
+
+This required two real UI fixes found by the suite: a 401 during `POST /api/runs`
+now carries its HTTP status so the auth surface renders, and a first-ever 401 is
+no longer upgraded to "expired" by a second parallel rejection.
+
+## Static and unit verification (current, 2026-10-11)
+
+Run from the repository root on the feature branch, and repeated from a literal
+clean clone:
+
+| Command | Result |
+|---|---|
+| `npm run typecheck` | pass (exit 0) |
+| `npm run lint` | pass (exit 0, no output) |
+| `npm test` | pass — **27 files, 172 tests**, 0 failures |
+| `npm run build` | pass (exit 0) — 19 routes (2 static/page + 17 `/api/*` dynamic) |
+| `npm run test:e2e` | pass — **13 passed (22.2s)**, Playwright against the production build |
+| `cargo fmt --check` (apps/desktop/src-tauri) | pass (exit 0) |
+
+`npm test` was run three more times back to back on the same tree to check for
+flakiness: 27 files / 172 tests passed every time.
+
+## Clean-clone audit (2026-10-11)
+
+A literal fresh clone of the committed branch tip (`40e44a4` at the time of the
+run; the doc commit that follows does not change any of the results) was verified
+with no local/untracked state, no `.env`, no warm `node_modules`, and no build
+output carried over:
+
+```
+git clone <repo> /tmp/th-audit-clean
+cd /tmp/th-audit-clean
+git status --short --branch     -> clean (nothing untracked, nothing ignored needed)
+ls -a                           -> source only; no handoff/prompt/runtime/build file
+npm ci --legacy-peer-deps       -> added 386 packages
+npm run typecheck                -> exit 0
+npm run lint                     -> exit 0
+npm test                         -> 27 files, 172 tests passed
+npm run build                    -> exit 0
+npm run test:e2e                 -> 13 passed (22.2s), exit 0
+```
+
+`npm ci` without `--legacy-peer-deps` fails on the peer-dependency graph, which is
+why CI uses the same flag. Tracked-file scan of the clone found no handoff,
+credential, runtime-workspace, or build artifact: the only matches for
+`prompt`/`.env` are `lib/prompt1.test.ts` (a test) and `.env.example`
+(placeholders only).
+
+## Docker packaging proof (2026-10-11)
+
+Docker 29.8.0 / Compose v5.5.1, executed against the real image built from this
+repository's `Dockerfile`:
+
+```
+docker compose -f compose.yaml -f compose.proof.yaml build tracehealer
+  -> image tracehealer-tracehealer built
+docker compose ... up -d
+  -> Up (healthy)   0.0.0.0:3000->3000/tcp
+docker inspect --format {{.State.Health.Status}}  -> healthy
+curl /api/health -> 200      curl /api/ready -> 200
+docker compose exec tracehealer id -> uid=1001(nextjs) gid=65533(nogroup)   (non-root)
+
+POST /api/runs {"mode":"demo","idempotencyKey":"docker-proof-1"}
+  -> 202 {"runId":"heal_8b8223e9","state":"queued","deduplicated":false}
+GET /api/runs/heal_8b8223e9/progress
+  -> summary.state healed · status healed
+     result.verification.passed true
+     artifacts.beforeTestExitCode 1 -> afterTestExitCode 0
+     artifacts.localCommit b390610 · events 6
+
+docker compose restart tracehealer
+  -> health 200
+GET /api/runs/heal_8b8223e9/progress  (same run id, after restart)
+  -> summary.state healed · verification.checks 4      (volume-persisted)
+
+docker compose down -v
+```
+
+The container proof overlay (`compose.proof.yaml`) only sets
+`TRACEHEALER_AUTH_MODE=local` + `TRACEHEALER_LOCAL_AUTH_ACK=true`, the documented
+development acknowledgement; the published port was loopback-reachable for the
+local proof only.
+
+## Cancellation authority (2026-10-11)
+
+A real ordering bug found by the full gate, not a test-only flake: a pipeline that
+observed the abort could persist its own terminal `needs-review` verdict *before*
+the coordinator recorded the cancel, and the terminal-state guard then rejected the
+cancellation, leaving a cancelled run reported as `needs-review`.
+
+- The coordinator now writes cancellation through `RunStore.cancelRun`, which may
+  replace a non-verified verdict but never rewrites a verified `healed` run, a
+  retryable `delivery-failed` one, or a decided `timed-out` one.
+- The pipeline no longer attempts to settle a terminal state once its signal is
+  aborted (`record()` and `persistResult()` both defer to the coordinator), so the
+  cancel is the last word regardless of interleaving.
+- Regression coverage: `lib/store.test.ts` (authoritative replace, verified run
+  untouched, delivery-failed/timed-out untouched, idempotent, unknown run),
+  `lib/db.run-store.test.ts` (durable adapter + audit event + other-tenant `null`),
+  and `lib/prompt1.test.ts` (no `needs-review` write survives a real cancel).
+
+## Provider selection fails closed (2026-10-11)
+
+`TRACEHEALER_SANDBOX_PROVIDER=docker` was parsed into policy but never bound, so
+setting it silently kept the in-process sandbox. `createPipelineDeps` now refuses
+with `503 unconfigured` instead of downgrading, while an explicitly injected
+provider still wins. `lib/container-sandbox.test.ts` covers both paths. The
+container provider itself is proven live in the same file: it builds
+`docker/sandbox.Dockerfile` and runs the attack probes (no-network,
+read-only-root, non-root, no-server-env, docker-socket-absent) against real
+containers.
 
 ## Dependency audit
 

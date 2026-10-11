@@ -108,15 +108,26 @@ export function sandboxEnvironment(base: NodeJS.ProcessEnv = process.env): Recor
   return env;
 }
 
-async function run(command: string, args: string[], cwd: string): Promise<CommandResult> {
+/** Throw a typed cancellation so the coordinator records the terminal state. */
+function assertNotCancelled(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    throw new TraceHealerError("cancelled", "Run cancelled before completion");
+  }
+}
+
+async function run(command: string, args: string[], cwd: string, signal?: AbortSignal): Promise<CommandResult> {
   const policy = loadPolicy();
   assertAllowedCommand(command, policy);
+  assertNotCancelled(signal);
   const started = performance.now();
   try {
     const result = await execFileAsync(command, args, {
       cwd,
       timeout: policy.commandTimeoutMs,
       maxBuffer: policy.maxOutputBytes,
+      // Passing the coordinator's signal lets an aborted run terminate the live
+      // child process instead of letting it finish and mutate the workspace.
+      signal,
       // Deliberately a minimal subset of the server environment, not 
       // process.env: target-repository code must never receive credentials.
       env: sandboxEnvironment() as NodeJS.ProcessEnv,
@@ -156,8 +167,10 @@ function percent(before: number, after: number) {
 
 export async function executeDemoSandbox(
   trace: AgentTrace,
-  options: { dataRoot?: string; workspaceId?: string; proposal?: PatchProposal } = {},
+  options: { dataRoot?: string; workspaceId?: string; proposal?: PatchProposal; signal?: AbortSignal } = {},
 ): Promise<SandboxResult> {
+  const signal = options.signal;
+  assertNotCancelled(signal);
   const workspaceId = options.workspaceId ?? `run_${randomUUID().slice(0, 8)}`;
   const dataRoot = options.dataRoot ?? process.env.TRACEHEALER_DATA_DIR ?? path.join(process.cwd(), ".tracehealer-data");
   const workspacePath = path.join(dataRoot, "workspaces", workspaceId);
@@ -178,14 +191,14 @@ export async function executeDemoSandbox(
   await mkdir(artifactsPath, { recursive: true });
   await cp(fixturePath, workspacePath, { recursive: true, force: true });
 
-  await run("git", ["init", "-q", "-b", "main"], workspacePath);
-  await run("git", ["config", "user.name", "TraceHealer"], workspacePath);
-  await run("git", ["config", "user.email", "bot@tracehealer.local"], workspacePath);
-  await run("git", ["add", "."], workspacePath);
-  await run("git", ["commit", "-q", "-m", "fixture: vulnerable support agent"], workspacePath);
+  await run("git", ["init", "-q", "-b", "main"], workspacePath, signal);
+  await run("git", ["config", "user.name", "TraceHealer"], workspacePath, signal);
+  await run("git", ["config", "user.email", "bot@tracehealer.local"], workspacePath, signal);
+  await run("git", ["add", "."], workspacePath, signal);
+  await run("git", ["commit", "-q", "-m", "fixture: vulnerable support agent"], workspacePath, signal);
 
-  const beforeTest = await run("node", ["--test"], workspacePath);
-  const beforeReplayCommand = await run("node", ["scripts/replay.mjs"], workspacePath);
+  const beforeTest = await run("node", ["--test"], workspacePath, signal);
+  const beforeReplayCommand = await run("node", ["scripts/replay.mjs"], workspacePath, signal);
   const beforeReplay = replayFrom(beforeReplayCommand.stdout);
   const beforeReproduced = beforeTest.exitCode !== 0 && !beforeReplay.success;
   if (!beforeReproduced) {
@@ -195,31 +208,36 @@ export async function executeDemoSandbox(
     );
   }
 
+  assertNotCancelled(signal);
   const targetFile = targetAbsolute;
   await writeFile(targetFile, proposal.content, "utf8");
 
-  const diffResult = await run("git", ["diff", "--", targetRelative], workspacePath);
+  const diffResult = await run("git", ["diff", "--", targetRelative], workspacePath, signal);
   const diff = diffResult.stdout.trim();
   if (!diff) throw new TraceHealerError("verification-failed", "Patch generation produced no source change.");
   if (Buffer.byteLength(diff, "utf8") > loadPolicy().maxDiffBytes) {
     throw new TraceHealerError("policy-rejected", "Generated diff exceeds the maximum size");
   }
 
-  const afterTest = await run("node", ["--test"], workspacePath);
-  const afterReplayCommand = await run("node", ["scripts/replay.mjs"], workspacePath);
+  const afterTest = await run("node", ["--test"], workspacePath, signal);
+  const afterReplayCommand = await run("node", ["scripts/replay.mjs"], workspacePath, signal);
   const afterReplay = replayFrom(afterReplayCommand.stdout);
   const passed = afterTest.exitCode === 0 && afterReplayCommand.exitCode === 0 && afterReplay.success;
 
+  // A cancelled run must never create a commit, even if verification happened to pass.
+  assertNotCancelled(signal);
+
   let localCommit: string | null = null;
   if (passed) {
-    await run("git", ["add", "--", targetRelative], workspacePath);
+    await run("git", ["add", "--", targetRelative], workspacePath, signal);
     const commit = await run(
       "git",
       ["commit", "-q", "-m", "fix(agent): handle Order API v3 contact schema"],
       workspacePath,
+      signal,
     );
     if (commit.exitCode === 0) {
-      const revision = await run("git", ["rev-parse", "--short", "HEAD"], workspacePath);
+      const revision = await run("git", ["rev-parse", "--short", "HEAD"], workspacePath, signal);
       localCommit = revision.exitCode === 0 ? revision.stdout.trim() : null;
     }
   }

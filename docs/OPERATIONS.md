@@ -52,15 +52,34 @@ docker compose up --build
 
 The image includes Node and git, runs as an unprivileged user, exposes port 3000, includes a healthcheck, and stores runtime evidence in the `tracehealer-data` volume.
 
+## Sandbox execution boundary
+
+Two providers exist, and the selection is explicit:
+
+| Provider | Behavior |
+|---|---|
+| `local-process` (default) | Runs the trusted target fixture in this process with an allowlisted environment (`sandboxEnvironment()`), so credentials are never visible to target code. |
+| `docker` | Hardened `docker run`: `--network none`, read-only root plus a 64 MB `noexec` tmpfs, `--cap-drop ALL` + `no-new-privileges`, non-root uid/gid, memory/cpu/pids caps, no Docker socket, no forwarded server environment, container destroyed after each run. |
+
+`TRACEHEALER_SANDBOX_PROVIDER=docker` is **implemented but not yet bound to the
+pipeline**, so it fails closed with `503 unconfigured` instead of silently using
+the in-process sandbox; an unknown value is rejected as malformed configuration.
+The container provider's guarantees and the attack probes that verify them (no
+network, read-only root, non-root, no credential forwarding, no Docker socket)
+are exercised by `npx vitest run lib/container-sandbox.test.ts`, which needs a
+reachable Docker daemon and builds `docker/sandbox.Dockerfile`.
+
 ## Endpoints
 
 | Method | Path | Purpose |
 |---|---|---|
 | `GET` | `/api/health` | Liveness and capability report |
-| `GET` | `/api/ready` | Readiness: config parses, data root writable |
+| `GET` | `/api/ready` | Canonical readiness: config parses, data root writable |
+| `GET` | `/api/readiness` | Compatibility alias; identical status/payload/headers to `/api/ready` |
 | `GET` | `/api/metrics` | Service metrics derived from persisted runs |
-| `POST` | `/api/heal` | Run the full pipeline synchronously; native trace optional; supports `idempotencyKey` |
-| `POST` | `/api/runs` | Create a run asynchronously (202); supports `idempotencyKey` |
+| `GET` | `/api/report` | Authenticated reporting summary, recent notifications, and configured sponsor links (bounded to the latest 5 runs) |
+| `POST` | `/api/heal` | Run the full pipeline synchronously; requires explicit `mode`; supports `idempotencyKey` |
+| `POST` | `/api/runs` | Create a run asynchronously (202); requires explicit `mode`; supports `idempotencyKey` |
 | `GET` | `/api/runs` | Persisted healing-run summaries |
 | `GET` | `/api/runs/:id` | One complete healing record with audit events |
 | `GET` | `/api/runs/:id/progress` | Server-owned state, events, and result for polling |
@@ -88,6 +107,49 @@ The image includes Node and git, runs as an unprivileged user, exposes port 3000
 A malformed numeric value makes `/api/ready` fail safely rather than starting
 with a partial configuration.
 
+## Authentication and tenancy
+
+| Variable | Purpose |
+|---|---|
+| `TRACEHEALER_AUTH_MODE` | `local` (default, development only) or `session` (production) |
+| `TRACEHEALER_SESSION_SECRET` | HMAC key for session cookies; required by `session` mode |
+| `TRACEHEALER_LOCAL_AUTH_ACK` | Must be `true` for `local` mode to serve under `NODE_ENV=production` |
+| `TRACEHEALER_TENANT_ID`, `TRACEHEALER_WORKSPACE_ID` | Tenant/workspace assigned to local-mode requests |
+
+`local` mode is development-only. It serves a synthetic `admin` principal so the
+zero-secret demo works, and it fails closed with `503 unconfigured` when
+`NODE_ENV=production` unless `TRACEHEALER_LOCAL_AUTH_ACK=true`. Never enable that
+acknowledgement for a deployment that is reachable by untrusted users.
+
+`session` mode fails closed with `503 unconfigured` when
+`TRACEHEALER_SESSION_SECRET` is missing, and returns `401 unauthorized` for a
+missing, tampered, or expired `tracehealer_session` cookie. The cookie is
+HTTP-only, `SameSite=Lax`, and `Secure` in production.
+
+Roles are least-privilege: `viewer` can read runs and artifacts; `operator` can
+also create, cancel, retry, and publish; only `admin` can change administrator
+policy or integration configuration. Every resource read is scoped to the
+caller's tenant, and a cross-tenant identifier returns `404`, not `403`, so IDs
+cannot be enumerated.
+
+Cookie-authenticated mutations are origin-checked before any side effect, so a
+foreign `Origin` receives `403 invalid-origin`. Provider webhooks use their own
+HMAC signature and never accept the browser session cookie.
+
+**Adapter note.** Tenant scoping is enforced by the durable adapter
+(`TRACEHEALER_STORE=sqlite`): every run read/write, metrics, report, artifact
+lookup, and idempotency key is bound to the session's tenant. The **default
+filesystem adapter is single-tenant** — it does not partition data by tenant
+and must never serve more than one tenant. Run the durable adapter (or replace
+`lib/store.ts`) before exposing the service to multiple tenants.
+
+Sessions are minted by the deployment's identity layer with
+`issueSessionToken(session, secret)` from `lib/auth.ts` and set on the
+`tracehealer_session` cookie. There is no built-in password login and no
+server-side revocation list yet, so a leaked token remains valid until its
+`expiresAt`; keep the TTL short and rotate `TRACEHEALER_SESSION_SECRET` to
+invalidate every outstanding session.
+
 ## Webhook signing
 
 When `NEATLOGS_WEBHOOK_SECRET` is configured, TraceHealer requires:
@@ -103,7 +165,16 @@ treated as an idempotent duplicate so provider retries are safe.
 
 ## Persistence
 
-The included filesystem store uses atomic rename and is appropriate for a single worker/hackathon deployment. Mount `TRACEHEALER_DATA_DIR` on persistent storage. For multiple workers, replace `lib/store.ts` with Postgres and move orchestration to a queue; the API/domain contracts do not need to change.
+`TRACEHEALER_STORE=sqlite` selects the durable transactional adapter (runs,
+summaries, events, queue, rate limits, artifacts in one database file). It
+enforces tenant scoping and survives restarts; set `TRACEHEALER_DB_FILE` to
+place the database on persistent storage.
+
+The default filesystem store uses atomic rename and is appropriate for a
+single-worker/hackathon deployment, but it is **single-tenant**: it does not
+partition runs by tenant. Mount `TRACEHEALER_DATA_DIR` on persistent storage.
+For multiple workers, back the same `SqlDriver` interface with Postgres and
+move orchestration to a queue; the API/domain contracts do not need to change.
 
 ## Safety controls
 
@@ -118,6 +189,8 @@ The included filesystem store uses atomic rename and is appropriate for a single
 
 ## Production checklist
 
+- [ ] Set `TRACEHEALER_AUTH_MODE=session` and a 32-byte `TRACEHEALER_SESSION_SECRET`.
+- [ ] Leave `TRACEHEALER_LOCAL_AUTH_ACK=false` so local mode cannot serve production traffic.
 - [ ] Put the service behind authenticated ingress.
 - [ ] Configure a random webhook secret.
 - [ ] Use a GitHub App installation token rather than a PAT.

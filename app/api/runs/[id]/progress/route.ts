@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { jsonError, noStore } from "@/lib/http";
 import { getRunProgress } from "@/lib/runs";
+import { authorize } from "@/lib/auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -8,8 +9,9 @@ export const dynamic = "force-dynamic";
 /** Server-owned progress: state, audit events, and the finished result if any. */
 export async function GET(_request: Request, context: { params: Promise<{ id: string }> }) {
   try {
+    const session = authorize(_request, "run:read");
     const { id } = await context.params;
-    const progress = await getRunProgress(id);
+    const progress = await getRunProgress(id, session.tenantId);
     if (!progress) {
       return NextResponse.json({ ok: false, code: "not-found", error: "Healing run not found" }, { status: 404 });
     }

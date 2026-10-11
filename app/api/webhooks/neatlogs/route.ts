@@ -3,9 +3,10 @@ import { ZodError } from "zod";
 import { jsonError, noStore, readBoundedText } from "@/lib/http";
 import { TraceHealerError } from "@/lib/errors";
 import { startHealingRun } from "@/lib/runs";
-import { findRunByIdempotencyKey } from "@/lib/store";
+import { runStoreForTenant } from "@/lib/run-read";
+import { defaultTenant } from "@/lib/runs";
 import { normalizeTracePayload } from "@/lib/trace-normalizer";
-import { assertFreshTimestamp, globalReplayGuard, verifySignature } from "@/lib/webhook";
+import { assertFreshTimestamp, observeDelivery, verifySignature } from "@/lib/webhook";
 
 export const runtime = "nodejs";
 
@@ -32,7 +33,7 @@ export async function POST(request: Request) {
 
     // Idempotency: a repeated signed delivery returns the existing run.
     const deliveryKey = signature ? `sig:${signature}` : null;
-    if (deliveryKey && globalReplayGuard.observe(deliveryKey)) {
+    if (deliveryKey && (await observeDelivery(deliveryKey))) {
       return NextResponse.json({ ok: true, duplicated: true, ignored: true }, { headers: noStore() });
     }
 
@@ -47,7 +48,10 @@ export async function POST(request: Request) {
     const trace = normalizeTracePayload(event.trace ?? event);
     const idempotencyKey = signature ? `webhook:${signature}` : undefined;
     if (idempotencyKey) {
-      const existing = await findRunByIdempotencyKey(idempotencyKey);
+      // Provider deliveries have no browser session; they resolve runs through
+      // the same tenant-scoped store the healing coordinator writes to.
+      const store = await runStoreForTenant(defaultTenant());
+      const existing = await store.findByIdempotencyKey(idempotencyKey);
       if (existing) {
         return NextResponse.json(
           { ok: true, accepted: true, deduplicated: true, healingRunId: existing.id, state: existing.state },

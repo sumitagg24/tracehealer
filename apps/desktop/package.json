@@ -1,0 +1,19 @@
+{
+  "name": "@tracehealer/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "TraceHealer desktop client (Tauri 2) — connects to the authenticated TraceHealer service; all repository execution and secrets stay server-side.",
+  "type": "module",
+  "scripts": {
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test src/*.test.mjs",
+    "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml",
+    "icons": "node scripts/generate-icons.mjs"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0",
+    "typescript": "^5.9.0"
+  }
+}
