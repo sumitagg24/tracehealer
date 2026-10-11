@@ -116,11 +116,11 @@ jobs:
         if: matrix.target != 'macos'
         run: |
           base=apps/desktop/src-tauri/target/${{ matrix.target == 'windows' && 'x86_64-pc-windows-msvc/release' || matrix.target == 'linux' && 'x86_64-unknown-linux-gnu/release/bundle' || 'release' }}
-          for artifact in "$base"/*.msi "$base"/*.exe "$base"/*/*.exe; do
+          if [ -f "$base"/*.msi ]; then umask 000 && find "$base" -type f \( -name "*.msi" -o -name "*.exe" \) -print0 | xargs -0 -n1 sh -c 'sha256sum "$1" > "${1}.sha256" && echo "artifact (unsigned test build): $1"'; else for artifact in "$base"/*.exe "$base"/*/*.exe; do
             [ -f "$artifact" ] || continue
             sha256sum "$artifact" > "${artifact}.sha256"
             echo "artifact (unsigned test build): $artifact"
-          done
+          done; fi
       - name: upload windows artifacts
         if: matrix.target == 'windows'
         uses: actions/upload-artifact@v4
