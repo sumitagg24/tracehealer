@@ -52,6 +52,23 @@ docker compose up --build
 
 The image includes Node and git, runs as an unprivileged user, exposes port 3000, includes a healthcheck, and stores runtime evidence in the `tracehealer-data` volume.
 
+## Sandbox execution boundary
+
+Two providers exist, and the selection is explicit:
+
+| Provider | Behavior |
+|---|---|
+| `local-process` (default) | Runs the trusted target fixture in this process with an allowlisted environment (`sandboxEnvironment()`), so credentials are never visible to target code. |
+| `docker` | Hardened `docker run`: `--network none`, read-only root plus a 64 MB `noexec` tmpfs, `--cap-drop ALL` + `no-new-privileges`, non-root uid/gid, memory/cpu/pids caps, no Docker socket, no forwarded server environment, container destroyed after each run. |
+
+`TRACEHEALER_SANDBOX_PROVIDER=docker` is **implemented but not yet bound to the
+pipeline**, so it fails closed with `503 unconfigured` instead of silently using
+the in-process sandbox; an unknown value is rejected as malformed configuration.
+The container provider's guarantees and the attack probes that verify them (no
+network, read-only root, non-root, no credential forwarding, no Docker socket)
+are exercised by `npx vitest run lib/container-sandbox.test.ts`, which needs a
+reachable Docker daemon and builds `docker/sandbox.Dockerfile`.
+
 ## Endpoints
 
 | Method | Path | Purpose |

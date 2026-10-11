@@ -50,6 +50,29 @@ function positiveInt(value: string | undefined, fallback: number, name: string):
   return parsed;
 }
 
+/**
+ * A closed set of allowed values.
+ *
+ * A typo must fail loudly: silently falling back would downgrade the execution
+ * boundary (for example `TRACEHEALER_SANDBOX_PROVIDER=dkr` quietly selecting the
+ * in-process sandbox) with no signal to the operator.
+ */
+function enumValue<T extends string>(
+  value: string | undefined,
+  allowed: readonly T[],
+  fallback: T,
+  name: string,
+): T {
+  if (value === undefined || value === "") return fallback;
+  if (!(allowed as readonly string[]).includes(value)) {
+    throw new TraceHealerError(
+      "invalid-input",
+      `Malformed configuration: ${name} must be one of ${allowed.join(", ")}`,
+    );
+  }
+  return value as T;
+}
+
 function boolValue(value: string | undefined, fallback: boolean): boolean {
   if (value === undefined || value === "") return fallback;
   return value === "true";
@@ -67,7 +90,12 @@ export function loadPolicy(env: NodeJS.ProcessEnv = process.env): TraceHealerPol
     maxDiffBytes: positiveInt(env.TRACEHEALER_MAX_DIFF_BYTES, 200_000, "TRACEHEALER_MAX_DIFF_BYTES"),
     allowTestEdits: boolValue(env.TRACEHEALER_ALLOW_TEST_EDITS, false),
     allowModelPatches: boolValue(env.TRACEHEALER_ALLOW_MODEL_PATCHES, false),
-    sandboxProvider: env.TRACEHEALER_SANDBOX_PROVIDER === "docker" ? "docker" : "local-process",
+    sandboxProvider: enumValue(
+      env.TRACEHEALER_SANDBOX_PROVIDER,
+      ["local-process", "docker"] as const,
+      "local-process",
+      "TRACEHEALER_SANDBOX_PROVIDER",
+    ),
     container: {
       image: env.TRACEHEALER_CONTAINER_IMAGE ?? "tracehealer-sandbox:latest",
       memoryMb: positiveInt(env.TRACEHEALER_CONTAINER_MEMORY_MB, 512, "TRACEHEALER_CONTAINER_MEMORY_MB"),
