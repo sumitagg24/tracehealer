@@ -115,8 +115,9 @@ jobs:
       - name: compute checksums
         if: matrix.target != 'macos'
         run: |
-          cd apps/desktop/src-tauri/target/${{ matrix.target == 'windows' && 'x86_64-pc-windows-msvc/release' || matrix.target == 'linux' && 'x86_64-unknown-linux-gnu/release/bundle' || 'release' }}
-          find . -type f \( -iname "*.msi" -o -iname "*.exe" -o -iname "*.AppImage" -o -iname "*.deb" \) | while read -r artifact; do
+          base=apps/desktop/src-tauri/target/${{ matrix.target == 'windows' && 'x86_64-pc-windows-msvc/release' || matrix.target == 'linux' && 'x86_64-unknown-linux-gnu/release/bundle' || 'release' }}
+          for artifact in "$base"/*.msi "$base"/*.exe "$base"/*/*.exe; do
+            [ -f "$artifact" ] || continue
             sha256sum "$artifact" > "${artifact}.sha256"
             echo "artifact (unsigned test build): $artifact"
           done
