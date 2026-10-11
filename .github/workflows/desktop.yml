@@ -3,8 +3,12 @@ name: desktop
 on:
   push:
     branches: [feat/tracehealer-full-flow, feat/tracehealer-production-completion, main]
+    # A release-candidate or release tag now runs the desktop matrix and the
+    # release job below. Branch pushes keep behaving exactly as before.
+    tags: ["v*"]
   pull_request:
     branches: [feat/tracehealer-full-flow, feat/tracehealer-production-completion, main]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -112,16 +116,6 @@ jobs:
         run: npx tauri build --target ${{ matrix.target == 'macos' && 'universal-apple-darwin' || matrix.target == 'linux' && 'x86_64-unknown-linux-gnu' || 'x86_64-pc-windows-msvc' }}
         env:
           MACOSX_DEPLOYMENT_TARGET: "13.0"
-      - name: compute checksums
-        if: matrix.target != 'macos'
-        shell: bash
-        run: |
-          base=apps/desktop/src-tauri/target/${{ matrix.target == 'windows' && 'x86_64-pc-windows-msvc/release' || matrix.target == 'linux' && 'x86_64-unknown-linux-gnu/release/bundle' || 'release' }}
-          for artifact in "$base"/*.msi "$base"/*.exe "$base"/*/*.exe; do
-            [ -f "$artifact" ] || continue
-            sha256sum "$artifact" > "${artifact}.sha256"
-            echo "artifact (unsigned test build): $artifact"
-          done
       - name: upload windows artifacts
         if: matrix.target == 'windows'
         uses: actions/upload-artifact@v4
@@ -151,28 +145,55 @@ jobs:
           if-no-files-found: warn
 
   release-artifacts:
+    # Publishes the installers produced by the three platform legs above. Nothing
+    # is rebuilt here, and a merged tag still runs every build and test first.
     needs: [build-desktop]
+    # Tags only. A branch push or a manual dispatch never publishes a release.
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
       - uses: actions/download-artifact@v4
         with:
           pattern: tracehealer-desktop-*-unsigned
           merge-multiple: true
+          path: dist
+      - name: checksum the final installer bundles
+        # Checksums are generated after packaging, over the downloaded bundles
+        # only, so they always describe the files users download. The script
+        # fails loudly if no installer is present, if a path collides, or if an
+        # installer is a symlink. Node built-ins only, so this runs identically
+        # on any runner.
+        run: node scripts/generate-release-checksums.mjs dist
       - name: attach release assets
         uses: softprops/action-gh-release@v2
         with:
+          # A "-rc" tag publishes as a prerelease; a plain vX.Y.Z tag publishes
+          # normally. Signing credentials are not configured in this repository,
+          # so every asset here is unsigned and nothing below claims otherwise.
+          prerelease: ${{ contains(github.ref_name, '-rc') }}
           files: |
-            *.msi
-            *.exe
-            *.dmg
-            *.AppImage
-            *.deb
-            *.sha256
+            dist/**/*.msi
+            dist/**/*.exe
+            dist/**/*.dmg
+            dist/**/*.AppImage
+            dist/**/*.deb
+            dist/SHA256SUMS.txt
           body: |
-            Unsigned test build. Production signing and macOS notarization are
-            configured separately; verify the .sha256 checksums before use.
+            PREVIEW / UNSIGNED build of TraceHealer. These installers are not code
+            signed and the macOS disk image is not notarized.
+
+            - Windows may show a SmartScreen warning; macOS Gatekeeper may block
+              the app until you explicitly allow it in System Settings.
+            - The Linux packages are preview builds.
+            - There is no auto-updater in this build, so nothing installs an
+              update on its own.
+            - External sign-in (OIDC) and the sponsor-provider integrations are
+              unconfigured unless a separate deployment says otherwise.
+            - Verify `SHA256SUMS.txt` before running any installer.
         if: ${{ !env.ACT }}
