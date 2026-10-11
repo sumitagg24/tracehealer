@@ -260,18 +260,23 @@ clean clone:
 |---|---|
 | `npm run typecheck` | pass (exit 0) |
 | `npm run lint` | pass (exit 0, no output) |
-| `npm test` | pass — **27 files, 172 tests**, 0 failures |
-| `npm run build` | pass (exit 0) — 19 routes (2 static/page + 17 `/api/*` dynamic) |
-| `npm run test:e2e` | pass — **13 passed (22.2s)**, Playwright against the production build |
+| `npm test` | pass — **28 test files, 189 tests**, 0 failures, exit 0 |
+| `npm run build` | pass (exit 0) — 21 routes (1 page route + 20 `/api/*` dynamic) |
+| `npm run test:e2e` | pass — **13 passed (21.4s)**, exit 0, Playwright against the production build |
 | `cargo fmt --check` (apps/desktop/src-tauri) | pass (exit 0) |
+| `cargo check` (apps/desktop/src-tauri) | pass (exit 0) on this host toolchain |
+| `node --test` (apps/desktop/src/*.test.mjs) | pass — **62 tests**, 0 failures |
 
-`npm test` was run three more times back to back on the same tree to check for
-flakiness: 27 files / 172 tests passed every time.
+The figures above are from the gate re-run after the desktop client landed. The same
+gate had previously reported the then-current 172-test total; the suite has grown to
+189 tests across 28 files, and the same commands pass from a fresh checkout on the
+GitHub runner (the `quality` and `e2e` jobs of CI run `38155469309`).
 
 ## Clean-clone audit (2026-10-11)
 
 A literal fresh clone of the committed branch tip (`40e44a4` at the time of the
-run; the doc commit that follows does not change any of the results) was verified
+run; it predates the desktop-client commits, which are covered instead by the
+desktop workflow matrix and by the gate re-run in the section above) was verified
 with no local/untracked state, no `.env`, no warm `node_modules`, and no build
 output carried over:
 
@@ -364,3 +369,33 @@ containers.
 (which includes dev-only tooling transitive dependencies) is intentionally not
 force-fixed, because `npm audit fix --force` would downgrade Next.js; the
 production dependency set is what ships and it is clean.
+
+## Desktop release evidence (2026-10-11)
+
+The desktop client exists only as an explicitly unsigned preview.
+
+```
+desktop workflow run 38155469324   (main @ cb18569)   windows/macos/linux all pass
+  artifacts: tracehealer-desktop-windows-unsigned    5,555,371 bytes
+             tracehealer-desktop-macos-unsigned      7,064,606 bytes
+             tracehealer-desktop-linux-unsigned     88,666,602 bytes
+
+gh run download 38155469324 --dir <tmp>        -> 5 installers, no .sha256 inside
+sha256sum <each installer>                     -> 5 hashes (listed in docs/PR_BODY.md)
+gh release create v0.1.0-rc.1 --prerelease ... -> 6 assets uploaded (incl. SHA256SUMS.txt)
+curl -sSL <public asset url> (no auth)         -> HTTP 200; MSI byte-identical
+```
+
+Verified on the downloaded files: MSI database reports `ProductName=TraceHealer`
+and `ProductVersion=0.1.0`; the `msiexec /a` administrative extract contains
+`tracehealer-desktop.exe` (11,494,400 bytes, version `0.1.0`); Authenticode reports
+`NotSigned` for both the MSI and the NSIS installer; the AppImage is a 64-bit
+x86-64 ELF with the AppImage type-2 magic and an embedded squashfs; the deb control
+metadata is `trace-healer 0.1.0 amd64`; the DMG is a valid UDIF image (`koly` v4,
+GPT + `Apple_HFS`).
+
+**Not verified:** the installers were never installed or launched, so packaged
+runtime behaviour (main window, tray, notifications, server connection, sign-in,
+logout, uninstall) is unverified. Local packaging is impossible on this host — the
+active Rust target is `x86_64-pc-windows-gnu` with no `windres`, and there is no
+MSVC toolchain — so the CI artifacts are the only available ones.
