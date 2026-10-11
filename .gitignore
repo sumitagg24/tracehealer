@@ -18,6 +18,9 @@ dist/
 # agent/tooling state
 .freebuff/
 
+# Rust build output (apps/desktop)
+apps/desktop/src-tauri/target/
+
 # tests
 coverage/
 

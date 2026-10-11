@@ -60,6 +60,7 @@ The image includes Node and git, runs as an unprivileged user, exposes port 3000
 | `GET` | `/api/ready` | Canonical readiness: config parses, data root writable |
 | `GET` | `/api/readiness` | Compatibility alias; identical status/payload/headers to `/api/ready` |
 | `GET` | `/api/metrics` | Service metrics derived from persisted runs |
+| `GET` | `/api/report` | Authenticated reporting summary, recent notifications, and configured sponsor links (bounded to the latest 5 runs) |
 | `POST` | `/api/heal` | Run the full pipeline synchronously; requires explicit `mode`; supports `idempotencyKey` |
 | `POST` | `/api/runs` | Create a run asynchronously (202); requires explicit `mode`; supports `idempotencyKey` |
 | `GET` | `/api/runs` | Persisted healing-run summaries |
@@ -118,6 +119,13 @@ Cookie-authenticated mutations are origin-checked before any side effect, so a
 foreign `Origin` receives `403 invalid-origin`. Provider webhooks use their own
 HMAC signature and never accept the browser session cookie.
 
+**Adapter note.** Tenant scoping is enforced by the durable adapter
+(`TRACEHEALER_STORE=sqlite`): every run read/write, metrics, report, artifact
+lookup, and idempotency key is bound to the session's tenant. The **default
+filesystem adapter is single-tenant** — it does not partition data by tenant
+and must never serve more than one tenant. Run the durable adapter (or replace
+`lib/store.ts`) before exposing the service to multiple tenants.
+
 Sessions are minted by the deployment's identity layer with
 `issueSessionToken(session, secret)` from `lib/auth.ts` and set on the
 `tracehealer_session` cookie. There is no built-in password login and no
@@ -140,7 +148,16 @@ treated as an idempotent duplicate so provider retries are safe.
 
 ## Persistence
 
-The included filesystem store uses atomic rename and is appropriate for a single worker/hackathon deployment. Mount `TRACEHEALER_DATA_DIR` on persistent storage. For multiple workers, replace `lib/store.ts` with Postgres and move orchestration to a queue; the API/domain contracts do not need to change.
+`TRACEHEALER_STORE=sqlite` selects the durable transactional adapter (runs,
+summaries, events, queue, rate limits, artifacts in one database file). It
+enforces tenant scoping and survives restarts; set `TRACEHEALER_DB_FILE` to
+place the database on persistent storage.
+
+The default filesystem store uses atomic rename and is appropriate for a
+single-worker/hackathon deployment, but it is **single-tenant**: it does not
+partition runs by tenant. Mount `TRACEHEALER_DATA_DIR` on persistent storage.
+For multiple workers, back the same `SqlDriver` interface with Postgres and
+move orchestration to a queue; the API/domain contracts do not need to change.
 
 ## Safety controls
 
