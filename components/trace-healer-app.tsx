@@ -33,6 +33,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { BrandMark } from "@/components/brand-mark";
+import { NotificationBell } from "@/components/notification-panel";
 import { DEMO_INCIDENT, DEMO_TRACE } from "@/lib/demo-data";
 import { isTerminal } from "@/lib/run-state";
 import type { AuditEvent, HealResult, RunState, RunSummary, TraceSpan } from "@/lib/types";
@@ -326,9 +327,7 @@ function Topbar({ page, onMenu }: { page: Page; onMenu: () => void }) {
           <Search size={15} />
           <span>Search unavailable</span>
         </button>
-        <button className="icon-button" aria-label="Notifications unavailable in this build" disabled title="Notifications are delivered through configured integrations, not this bell">
-          <Bell size={17} />
-        </button>
+        <NotificationBell />
         <a
           className="icon-button"
           aria-label="Open TraceHealer on GitHub"
