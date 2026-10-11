@@ -54,9 +54,14 @@ Open [http://localhost:3000](http://localhost:3000), inspect the red span, and c
 ```bash
 npm run typecheck
 npm run lint
-npm test
+npm test          # unit + contract suite (vitest)
 npm run build
+npm run test:e2e  # browser E2E (Playwright): builds, then runs two loopback servers
 ```
+
+The E2E suite starts the production build twice: a `local`-auth server for the
+zero-secret demo flow and a `session` + sqlite server that enforces tenant
+isolation, so authorization paths are exercised for real.
 
 ## Docker
 

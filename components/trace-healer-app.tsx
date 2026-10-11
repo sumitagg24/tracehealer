@@ -1156,9 +1156,37 @@ export function TraceHealerApp() {
   const [detailError, setDetailError] = useState<string | null>(null);
 
   const pollRef = useRef<number | null>(null);
+  // True once any authenticated request has succeeded in this page session, so
+  // a later 401 can be reported as an expired session rather than a fresh
+  // sign-in prompt.
+  const hadSuccessRef = useRef(false);
 
   const activeStep = runSummary ? STEP_FOR_STATE[runSummary.state] : 0;
   const healBusy = runState === "running";
+
+  /** Classify a request failure into the authentication surface. A 401 before
+   * any success means "sign in"; a 401 after a success means the session
+   * expired mid-use; a 403 means the role is too low. Returns the HTTP status
+   * so callers can tell an auth rejection (server answered) from an offline
+   * failure (server never answered). */
+  const classifyAuthError = useCallback((error: unknown): number | undefined => {
+    const status = (error as Error & { status?: number }).status;
+    if (status === 401) {
+      // A first-ever rejection stays a sign-in prompt; only a session that was
+      // already working (or already reported expired) is treated as expired.
+      setAuthState((current) =>
+        current === "expired" || hadSuccessRef.current ? "expired" : "unauthenticated",
+      );
+    } else if (status === 403) {
+      setAuthState("forbidden");
+    }
+    return status;
+  }, []);
+
+  /** Record that the server accepted an authenticated request. */
+  const markAuthenticated = useCallback(() => {
+    hadSuccessRef.current = true;
+  }, []);
 
   const refreshIndex = useCallback(async () => {
     setRunsLoading(true);
@@ -1168,21 +1196,22 @@ export function TraceHealerApp() {
         getJson<{ metrics: MetricsSnapshot }>("/api/metrics"),
         fetch("/api/health", { cache: "no-store" }).then((response) => response.json()) as Promise<{ status: string }>,
       ]);
+      markAuthenticated();
       setSummaries(runsPayload.runs);
       setMetrics(metricsPayload.metrics);
       setOnline(healthPayload.status === "healthy");
       setRunsError(null);
+      setAuthState(null);
     } catch (error) {
-      const status = (error as Error & { status?: number }).status;
-      if (status === 401) setAuthState((current) => (current === null ? "unauthenticated" : "expired"));
-      else if (status === 403) setAuthState("forbidden");
+      const status = classifyAuthError(error);
       setRunsError(error instanceof Error ? error.message : "Failed to load runs");
-      setOnline(false);
+      // The service answered (401/403): it is online, just not authorized.
+      if (status === undefined) setOnline(false);
     } finally {
       setRunsLoading(false);
       setMetricsLoading(false);
     }
-  }, []);
+  }, [classifyAuthError, markAuthenticated]);
 
   // Initial load uses promise callbacks so no state is set synchronously
   // inside the effect body.
@@ -1191,14 +1220,16 @@ export function TraceHealerApp() {
     getJson<{ runs: RunSummary[] }>("/api/runs?limit=25")
       .then((payload) => {
         if (!cancelled) {
+          markAuthenticated();
           setSummaries(payload.runs);
           setRunsError(null);
         }
       })
       .catch((error) => {
         if (!cancelled) {
+          const status = classifyAuthError(error);
           setRunsError(error instanceof Error ? error.message : "Failed to load runs");
-          setOnline(false);
+          if (status === undefined) setOnline(false);
         }
       })
       .finally(() => {
@@ -1206,17 +1237,27 @@ export function TraceHealerApp() {
       });
     getJson<{ metrics: MetricsSnapshot }>("/api/metrics")
       .then((payload) => {
-        if (!cancelled) setMetrics(payload.metrics);
+        if (!cancelled) {
+          markAuthenticated();
+          setMetrics(payload.metrics);
+        }
       })
-      .catch(() => undefined)
+      .catch((error) => {
+        if (!cancelled) classifyAuthError(error);
+      })
       .finally(() => {
         if (!cancelled) setMetricsLoading(false);
       });
     getJson<{ integrations: IntegrationSnapshot }>("/api/integrations")
       .then((payload) => {
-        if (!cancelled) setIntegrations(payload.integrations);
+        if (!cancelled) {
+          markAuthenticated();
+          setIntegrations(payload.integrations);
+        }
       })
-      .catch(() => undefined);
+      .catch((error) => {
+        if (!cancelled) classifyAuthError(error);
+      });
     fetch("/api/health", { cache: "no-store" })
       .then((response) => response.json() as Promise<{ status: string }>)
       .then((payload) => {
@@ -1228,7 +1269,7 @@ export function TraceHealerApp() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [classifyAuthError, markAuthenticated]);
 
   useEffect(() => {
     return () => {
@@ -1241,6 +1282,7 @@ export function TraceHealerApp() {
       const payload = await getJson<{ summary: RunSummary | null; events: AuditEvent[]; result: HealResult | null }>(
         `/api/runs/${runId}/progress`,
       );
+      markAuthenticated();
       setRunSummary(payload.summary);
       setRunEvents(payload.events);
       if (payload.result) setResult(payload.result);
@@ -1273,7 +1315,7 @@ export function TraceHealerApp() {
       setRunError(error instanceof Error ? error.message : "Progress polling failed");
       setRunState("error");
     }
-  }, [refreshIndex]);
+  }, [refreshIndex, markAuthenticated]);
 
   const runHealer = useCallback(async () => {
     setActivePage("incident");
@@ -1291,16 +1333,25 @@ export function TraceHealerApp() {
         body: JSON.stringify({ mode: "demo" }),
       });
       const payload = (await response.json()) as { ok: boolean; runId?: string; error?: string };
-      if (!response.ok || !payload.runId) throw new Error(payload.error ?? "The healer did not start a run");
+      if (!response.ok || !payload.runId) {
+        // Carry the HTTP status so an authentication rejection surfaces the
+        // sign-in/expired surface instead of only a red run error.
+        const failure = new Error(payload.error ?? "The healer did not start a run") as Error & {
+          status?: number;
+        };
+        failure.status = response.status;
+        throw failure;
+      }
 
       setActiveRunId(payload.runId);
       await pollRun(payload.runId);
       pollRef.current = window.setInterval(() => void pollRun(payload.runId!), 700);
     } catch (error) {
+      classifyAuthError(error);
       setRunError(error instanceof Error ? error.message : "Healing run failed");
       setRunState("error");
     }
-  }, [pollRun]);
+  }, [pollRun, classifyAuthError]);
 
   const cancelRun = useCallback(async () => {
     if (!activeRunId) return;

@@ -34,6 +34,7 @@ remains unverified or externally blocked. Statuses are truthful: a capability is
 | Sandbox env isolation | `sandboxEnvironment()` forwards only operational variables to child processes | `lib/sandbox.test.ts` | Still no OS-level container boundary | verified |
 | Model patch strategy | `createModelStrategy` strict JSON, policy-gated, off by default | `lib/strategies.test.ts` adversarial cases | Live model provider unverified | implemented |
 | Readiness + metrics | `/api/ready` (canonical) + `/api/readiness` alias, `/api/metrics` derived from persisted runs | HTTP smoke, `lib/routes.test.ts` | None found | verified |
+| Browser end-to-end behaviour | Playwright suite runs the production build against a local-auth server and a session+sqlite server (loopback only) | `e2e/tracehealer.spec.ts` — 13 passed | Headless Chromium only; no visual-regression baseline | verified |
 | Notifications & outcome reporting | `/api/report` (session-authenticated, tenant-scoped, bounded to the latest 5 runs) + in-app notification feed derived from persisted runs; optional savings figure is always a labeled estimate; sponsor links are https-only and count/length-bounded | `lib/report.route.test.ts` (helper + HTTP authorization/tenant tests) | Estimate depends on user-supplied assumptions; never measured | verified |
 | Repository context (local graph) | `lib/context.ts` scans the target fixture for files/symbols/tests | pipeline test | Only JS/TS-shaped files | verified |
 | Real remote repository checkout | Not implemented; the target is the local fixture | — | Needs clone/commit pinning + container isolation | blocked (design) |
@@ -52,6 +53,7 @@ remains unverified or externally blocked. Statuses are truthful: a capability is
 | After-trace export / Slack | Configurable adapters, failures isolated from verification | pipeline code path | No live provider (no credentials) | blocked (credentials) |
 | Dodo / AWS / CFO sponsor adapters | Not implemented | — | Requires official docs + contracts | out of scope |
 | Docker packaging | `Dockerfile` + `compose.yaml` present | CI builds the app | Not built/run in this environment (no Docker) | unverified here |
+| Desktop client (Tauri 2) | Rust shell: tray, notifications, deep links, OS-keychain session vault, PKCE authorization, https-only browser hand-off; minimal static webview shell | desktop frontend typecheck + 28 node tests + `cargo fmt --check` pass locally; `cargo check`/`clippy`/`tauri build` are proven by the GitHub `desktop` workflow (windows/macos/ubuntu) | Local Windows linking needs Visual Studio C++ Build Tools + Windows SDK (absent here); no signing/notarization yet, so CI artifacts are unsigned test builds | partially verified (CI pending) |
 
 ## Prompt 2 — authenticated workspace and tenant authorization
 

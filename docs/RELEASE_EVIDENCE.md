@@ -215,6 +215,39 @@ readiness route is `/api/ready` (not `/api/readiness`). Dev-only `npm audit`
 highs are the `eslint-config-next` → `@next/eslint-plugin-next` → `fast-glob` →
 `micromatch` → `braces` chain with no production impact.
 
+## Browser E2E (Playwright, production build)
+
+`npm run test:e2e` builds the app and starts two servers from that one build,
+both bound to loopback:
+
+- port 3188 — `TRACEHEALER_AUTH_MODE=local` with the documented
+  `TRACEHEALER_LOCAL_AUTH_ACK=true` acknowledgement (NODE_ENV=production);
+- port 3189 — `TRACEHEALER_AUTH_MODE=session` with the durable
+  `TRACEHEALER_STORE=sqlite` adapter, which is the mode that enforces tenant
+  isolation.
+
+Result: **13 passed (26.4s)**, file `e2e/tracehealer.spec.ts`.
+
+| Scenario | Result |
+|---|---|
+| local development auth: control center loads without a session | pass |
+| explicit demo heal: live progress, cancel affordance, healed card, ALL CHECKS PASSED, `before exit 1 → after exit 0` | pass |
+| run detail: timeline, context, checks, metrics, delivery, artifact content types | pass |
+| unsupported (timeout) failure settles `needs-review`, never a fabricated fix | pass |
+| active cancellation settles `cancelled` with no resurrection | pass |
+| notification popover lists persisted runs, Escape closes and restores focus | pass |
+| `/api/report` defaults: estimate disabled, no fabricated money/time, ≤5 recent runs, no sponsor links | pass |
+| unauthenticated 401 responses render the sign-in surface (not an offline banner) | pass |
+| a session rejected mid-use renders the expired-session surface | pass |
+| no horizontal overflow at 1440/1024/768/390 px | pass |
+| every disabled control has an explanation and every control has an accessible name | pass |
+| session server fails closed (401) and enforces role separation (viewer POST → 403) | pass |
+| artifact download: anonymous → 401, matching tenant → 200, foreign tenant → 404 | pass |
+
+This required two real UI fixes found by the suite: a 401 during `POST /api/runs`
+now carries its HTTP status so the auth surface renders, and a first-ever 401 is
+no longer upgraded to "expired" by a second parallel rejection.
+
 ## Dependency audit
 
 `npm audit --omit=dev` reports `found 0 vulnerabilities`. The full `npm audit`
